@@ -603,7 +603,11 @@ fn test_like_post_no_event_on_duplicate() {
     let author = Address::generate(&env);
     let user1 = Address::generate(&env);
     let user2 = Address::generate(&env);
-    let post_id = client.create_post(&author, &String::from_str(&env, "Duplicate event test"), &None);
+    let post_id = client.create_post(
+        &author,
+        &String::from_str(&env, "Duplicate event test"),
+        &None,
+    );
 
     client.like_post(&user1, &post_id);
     let like_count_after_first = client.get_like_count(&post_id);
@@ -1908,7 +1912,11 @@ fn test_tip_fee_split_matches_fee_bps_config() {
     client.initialize(&admin, &treasury, &250);
 
     let token = setup_token(&env, &tipper);
-    let post_id = client.create_post(&author, &String::from_str(&env, "Fee split config test"), &None);
+    let post_id = client.create_post(
+        &author,
+        &String::from_str(&env, "Fee split config test"),
+        &None,
+    );
 
     let tip_amount: i128 = 2000;
     client.tip(&tipper, &post_id, &token, &tip_amount);
@@ -2293,7 +2301,11 @@ fn test_tip_cooldown_rejects_within_window() {
     client.set_tip_cooldown_window(&10);
 
     let token = setup_token(&env, &tipper);
-    let post_id = client.create_post(&author, &String::from_str(&env, "cooldown test post"), &None);
+    let post_id = client.create_post(
+        &author,
+        &String::from_str(&env, "cooldown test post"),
+        &None,
+    );
 
     client.tip(&tipper, &post_id, &token, &100);
     // Same ledger → cooldown not expired → panics
@@ -2317,7 +2329,11 @@ fn test_tip_cooldown_allows_after_window() {
     client.set_tip_cooldown_window(&10);
 
     let token = setup_token(&env, &tipper);
-    let post_id = client.create_post(&author, &String::from_str(&env, "cooldown test post"), &None);
+    let post_id = client.create_post(
+        &author,
+        &String::from_str(&env, "cooldown test post"),
+        &None,
+    );
 
     client.tip(&tipper, &post_id, &token, &100);
 
@@ -3678,8 +3694,7 @@ fn test_create_reply_top_level() {
     let parent_id = client.create_post(&author, &String::from_str(&env, "parent post"), &None);
 
     // Create reply
-    let reply_id =
-        client.create_post(&replier, &String::from_str(&env, "reply"), &Some(parent_id));
+    let reply_id = client.create_post(&replier, &String::from_str(&env, "reply"), &Some(parent_id));
 
     // Verify reply appears in get_replies
     let replies = client.get_replies(&parent_id, &0, &10);
@@ -3706,12 +3721,18 @@ fn test_create_nested_reply() {
     let reply3 = client.create_post(&author, &String::from_str(&env, "l3"), &Some(reply2));
 
     // Each parent's reply list should contain exactly the direct child
-    assert_eq!(client.get_replies(&post_id, &0, &10).get(0).unwrap(), reply1);
+    assert_eq!(
+        client.get_replies(&post_id, &0, &10).get(0).unwrap(),
+        reply1
+    );
     assert_eq!(client.get_replies(&reply1, &0, &10).get(0).unwrap(), reply2);
     assert_eq!(client.get_replies(&reply2, &0, &10).get(0).unwrap(), reply3);
 
     // Verify all posts are individually accessible
-    assert_eq!(client.get_post(&reply3).unwrap().content, String::from_str(&env, "l3"));
+    assert_eq!(
+        client.get_post(&reply3).unwrap().content,
+        String::from_str(&env, "l3")
+    );
 }
 
 #[test]
@@ -3724,7 +3745,11 @@ fn test_create_reply_nonexistent_parent_panics() {
     let author = Address::generate(&env);
 
     // Try to reply to a non-existent parent post
-    client.create_post(&author, &String::from_str(&env, "orphan reply"), &Some(99999));
+    client.create_post(
+        &author,
+        &String::from_str(&env, "orphan reply"),
+        &Some(99999),
+    );
 }
 
 #[test]

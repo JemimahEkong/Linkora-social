@@ -43,11 +43,11 @@ pub enum StorageKey {
     Report(u64, Address), // persistent: (post_id, reporter) -> Report
     ReportCount(u64),  // persistent: post_id -> u32 count of reports
     // ── Post Threading (ADR-008) ──────────────────────────────────────────
-    ParentPost(u64),        // persistent: post_id -> u64 direct parent (0 = top-level)
-    ThreadRoot(u64),        // persistent: post_id -> u64 root of the thread
-    ReplyIdx(u64, u32),     // persistent: (parent_id, seq) -> u64 reply_post_id
-    ReplyCount(u64),        // persistent: parent_id -> u32 total reply count
-    ThreadDepth(u64),       // persistent: post_id -> u32 depth (0 = top-level)
+    ParentPost(u64),    // persistent: post_id -> u64 direct parent (0 = top-level)
+    ThreadRoot(u64),    // persistent: post_id -> u64 root of the thread
+    ReplyIdx(u64, u32), // persistent: (parent_id, seq) -> u64 reply_post_id
+    ReplyCount(u64),    // persistent: parent_id -> u32 total reply count
+    ThreadDepth(u64),   // persistent: post_id -> u32 depth (0 = top-level)
 }
 
 #[contracterror]
@@ -1123,10 +1123,7 @@ impl LinkoraContract {
                 .persistent()
                 .get(&StorageKey::ThreadDepth(parent))
                 .unwrap_or(0u32);
-            assert!(
-                parent_depth < MAX_THREAD_DEPTH,
-                "max thread depth exceeded"
-            );
+            assert!(parent_depth < MAX_THREAD_DEPTH, "max thread depth exceeded");
         }
 
         // ── Write Post ──────────────────────────────────────────────────────
@@ -1170,9 +1167,7 @@ impl LinkoraContract {
                     .get(&author_key)
                     .unwrap_or(Vec::new(&env));
                 author_posts.push_back(id);
-                env.storage()
-                    .persistent()
-                    .set(&author_key, &author_posts);
+                env.storage().persistent().set(&author_key, &author_posts);
                 Self::bump(&env, &author_key);
             }
             Some(parent) => {
@@ -1279,9 +1274,7 @@ impl LinkoraContract {
                 // Find position of this reply in the index
                 for seq in 0..reply_count {
                     let idx_key = StorageKey::ReplyIdx(parent, seq);
-                    if let Some(reply_id) =
-                        env.storage().persistent().get::<_, u64>(&idx_key)
-                    {
+                    if let Some(reply_id) = env.storage().persistent().get::<_, u64>(&idx_key) {
                         if reply_id == post_id {
                             // Swap with last if not already last
                             let last = reply_count - 1;
@@ -1290,9 +1283,7 @@ impl LinkoraContract {
                                 if let Some(last_reply) =
                                     env.storage().persistent().get::<_, u64>(&last_idx_key)
                                 {
-                                    env.storage()
-                                        .persistent()
-                                        .set(&idx_key, &last_reply);
+                                    env.storage().persistent().set(&idx_key, &last_reply);
                                     Self::bump(&env, &idx_key);
                                 }
                                 env.storage().persistent().remove(&last_idx_key);
@@ -1305,7 +1296,9 @@ impl LinkoraContract {
                 }
                 let new_count = reply_count - 1;
                 if new_count == 0 {
-                    env.storage().persistent().remove(&StorageKey::ReplyCount(parent));
+                    env.storage()
+                        .persistent()
+                        .remove(&StorageKey::ReplyCount(parent));
                 } else {
                     env.storage()
                         .persistent()
@@ -2580,12 +2573,11 @@ impl LinkoraContract {
                                     if reply_id == post_id {
                                         let last = reply_count - 1;
                                         if seq != last {
-                                            let last_idx_key =
-                                                StorageKey::ReplyIdx(parent, last);
-                                            if let Some(last_reply) =
-                                                env.storage()
-                                                    .persistent()
-                                                    .get::<_, u64>(&last_idx_key)
+                                            let last_idx_key = StorageKey::ReplyIdx(parent, last);
+                                            if let Some(last_reply) = env
+                                                .storage()
+                                                .persistent()
+                                                .get::<_, u64>(&last_idx_key)
                                             {
                                                 env.storage()
                                                     .persistent()
