@@ -26,6 +26,9 @@ function scvString(value: string): xdr.ScVal {
 function scvU32(value: number): xdr.ScVal {
   return nativeToScVal(value, { type: "u32" });
 }
+function scvU64(value: number | bigint): xdr.ScVal {
+  return nativeToScVal(value, { type: "u64" });
+}
 function scvI128(value: number | bigint): xdr.ScVal {
   return nativeToScVal(value, { type: "i128" });
 }
@@ -374,5 +377,54 @@ export class LinkoraClient extends GeneratedLinkoraClient {
     if (!isSimulationSuccess(result) || !result.result) return null;
 
     return result.result.retval;
+  }
+
+
+  // ── Post Threading (ADR-008) ─────────────────────────────────────────────────
+
+  createPost(author: string, content: string, parentId?: number): string {
+    if (parentId !== undefined) {
+      return this.buildTxForContract(
+        this._contractId,
+        "create_post",
+        scvAddress(author),
+        scvString(content),
+        scvU64(parentId)
+      );
+    }
+    return super.createPost(author, content);
+  }
+
+  async getReplies(postId: number, offset: number, limit: number): Promise<number[]> {
+    const retval = await this.simulateCallOnContract(
+      this._contractId,
+      "get_replies",
+      scvU64(postId),
+      scvU32(offset),
+      scvU32(limit)
+    );
+    if (!retval) return [];
+    return (scValToNative(retval) as bigint[]).map(Number);
+  }
+
+  async getReplyCount(postId: number): Promise<number> {
+    const retval = await this.simulateCallOnContract(
+      this._contractId,
+      "get_reply_count",
+      scvU64(postId)
+    );
+    if (!retval) return 0;
+    return Number(scValToNative(retval));
+  }
+
+  async getThreadRoot(postId: number): Promise<number | null> {
+    const retval = await this.simulateCallOnContract(
+      this._contractId,
+      "get_thread_root",
+      scvU64(postId)
+    );
+    if (!retval) return null;
+    const val = scValToNative(retval);
+    return val != null ? Number(val) : null;
   }
 }

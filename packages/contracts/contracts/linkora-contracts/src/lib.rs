@@ -42,6 +42,12 @@ pub enum StorageKey {
     AttestationNullifier(BytesN<32>), // persistent: sha256(report_cbor) -> bool (replay guard)
     Report(u64, Address), // persistent: (post_id, reporter) -> Report
     ReportCount(u64),  // persistent: post_id -> u32 count of reports
+    // ── Post Threading (ADR-008) ──────────────────────────────────────────
+    ParentPost(u64),        // persistent: post_id -> u64 direct parent (0 = top-level)
+    ThreadRoot(u64),        // persistent: post_id -> u64 root of the thread
+    ReplyIdx(u64, u32),     // persistent: (parent_id, seq) -> u64 reply_post_id
+    ReplyCount(u64),        // persistent: parent_id -> u32 total reply count
+    ThreadDepth(u64),       // persistent: post_id -> u32 depth (0 = top-level)
 }
 
 #[contracterror]
@@ -82,6 +88,10 @@ const TIP_COOLDOWN_LEDGERS: u32 = 17_280;
 
 const MAX_PAGE_LIMIT: u32 = 50;
 const MAX_PAGINATION_LIMIT: u32 = 50;
+
+// ── Threading Constants (ADR-008) ──────────────────────────────────────────────
+
+const MAX_THREAD_DEPTH: u32 = 5;
 
 // ── Validation Constants ──────────────────────────────────────────────────────
 
@@ -273,6 +283,8 @@ pub struct PostCreatedEvent {
     pub id: u64,
     #[topic]
     pub author: Address,
+    pub parent_id: Option<u64>,
+    pub root_id: u64,
 }
 
 #[contractevent]
@@ -1088,12 +1100,36 @@ impl LinkoraContract {
 
     // ── Posts ─────────────────────────────────────────────────────────────────
 
-    pub fn create_post(env: Env, author: Address, content: String) -> u64 {
+    pub fn create_post(env: Env, author: Address, content: String, parent_id: Option<u64>) -> u64 {
         Self::bump_instance(&env);
         author.require_auth();
         validate_content(&content).expect("invalid content");
 
         let id: u64 = env.storage().instance().get(&POST_CT).unwrap_or(0u64) + 1;
+
+        // ── Threading validation ────────────────────────────────────────────
+        if let Some(parent) = parent_id {
+            // Verify parent exists
+            let parent_key = StorageKey::Post(parent);
+            assert!(
+                env.storage().persistent().has(&parent_key),
+                "parent post does not exist"
+            );
+            Self::bump(&env, &parent_key);
+
+            // Enforce max depth
+            let parent_depth: u32 = env
+                .storage()
+                .persistent()
+                .get(&StorageKey::ThreadDepth(parent))
+                .unwrap_or(0u32);
+            assert!(
+                parent_depth < MAX_THREAD_DEPTH,
+                "max thread depth exceeded"
+            );
+        }
+
+        // ── Write Post ──────────────────────────────────────────────────────
         let key = StorageKey::Post(id);
         env.storage().persistent().set(
             &key,
@@ -1109,18 +1145,95 @@ impl LinkoraContract {
         Self::bump(&env, &key);
         env.storage().instance().set(&POST_CT, &id);
 
-        // Track post ID under author's posts
-        let author_key = StorageKey::AuthorPosts(author.clone());
-        let mut author_posts: Vec<u64> = env
+        // ── Threading metadata (ADR-008) ────────────────────────────────────
+        match parent_id {
+            None => {
+                // Top-level post
+                env.storage()
+                    .persistent()
+                    .set(&StorageKey::ThreadRoot(id), &id);
+                Self::bump(&env, &StorageKey::ThreadRoot(id));
+                env.storage()
+                    .persistent()
+                    .set(&StorageKey::ParentPost(id), &0u64);
+                Self::bump(&env, &StorageKey::ParentPost(id));
+                env.storage()
+                    .persistent()
+                    .set(&StorageKey::ThreadDepth(id), &0u32);
+                Self::bump(&env, &StorageKey::ThreadDepth(id));
+
+                // Track post ID under author's posts (top-level only)
+                let author_key = StorageKey::AuthorPosts(author.clone());
+                let mut author_posts: Vec<u64> = env
+                    .storage()
+                    .persistent()
+                    .get(&author_key)
+                    .unwrap_or(Vec::new(&env));
+                author_posts.push_back(id);
+                env.storage()
+                    .persistent()
+                    .set(&author_key, &author_posts);
+                Self::bump(&env, &author_key);
+            }
+            Some(parent) => {
+                // Reply
+                let root: u64 = env
+                    .storage()
+                    .persistent()
+                    .get(&StorageKey::ThreadRoot(parent))
+                    .unwrap_or(parent);
+                let depth: u32 = env
+                    .storage()
+                    .persistent()
+                    .get(&StorageKey::ThreadDepth(parent))
+                    .unwrap_or(0u32);
+
+                env.storage()
+                    .persistent()
+                    .set(&StorageKey::ParentPost(id), &parent);
+                Self::bump(&env, &StorageKey::ParentPost(id));
+                env.storage()
+                    .persistent()
+                    .set(&StorageKey::ThreadRoot(id), &root);
+                Self::bump(&env, &StorageKey::ThreadRoot(id));
+                env.storage()
+                    .persistent()
+                    .set(&StorageKey::ThreadDepth(id), &(depth + 1));
+                Self::bump(&env, &StorageKey::ThreadDepth(id));
+
+                // Append to reply index
+                let reply_count: u32 = env
+                    .storage()
+                    .persistent()
+                    .get(&StorageKey::ReplyCount(parent))
+                    .unwrap_or(0u32);
+                env.storage()
+                    .persistent()
+                    .set(&StorageKey::ReplyIdx(parent, reply_count), &id);
+                Self::bump(&env, &StorageKey::ReplyIdx(parent, reply_count));
+                env.storage()
+                    .persistent()
+                    .set(&StorageKey::ReplyCount(parent), &(reply_count + 1));
+                Self::bump(&env, &StorageKey::ReplyCount(parent));
+
+                // Do NOT track replies in AuthorPosts
+            }
+        }
+
+        // Compute root_id for event payload (read back from ThreadRoot storage)
+        let event_root = env
             .storage()
             .persistent()
-            .get(&author_key)
-            .unwrap_or(Vec::new(&env));
-        author_posts.push_back(id);
-        env.storage().persistent().set(&author_key, &author_posts);
-        Self::bump(&env, &author_key);
+            .get::<_, u64>(&StorageKey::ThreadRoot(id))
+            .unwrap_or(id);
 
-        PostCreatedEvent { id, author }.publish(&env);
+        PostCreatedEvent {
+            id,
+            author,
+            parent_id,
+            root_id: event_root,
+        }
+        .publish(&env);
         id
     }
 
@@ -1149,7 +1262,71 @@ impl LinkoraContract {
         assert!(post.author == author, "only author can delete post");
         env.storage().persistent().remove(&key);
 
-        // Remove post ID from author's posts list
+        // ── Threading cleanup (ADR-008) ─────────────────────────────────────
+        // If this post is a reply, remove it from its parent's reply index
+        let parent: u64 = env
+            .storage()
+            .persistent()
+            .get(&StorageKey::ParentPost(post_id))
+            .unwrap_or(0u64);
+        if parent != 0 {
+            let reply_count: u32 = env
+                .storage()
+                .persistent()
+                .get(&StorageKey::ReplyCount(parent))
+                .unwrap_or(0u32);
+            if reply_count > 0 {
+                // Find position of this reply in the index
+                for seq in 0..reply_count {
+                    let idx_key = StorageKey::ReplyIdx(parent, seq);
+                    if let Some(reply_id) =
+                        env.storage().persistent().get::<_, u64>(&idx_key)
+                    {
+                        if reply_id == post_id {
+                            // Swap with last if not already last
+                            let last = reply_count - 1;
+                            if seq != last {
+                                let last_idx_key = StorageKey::ReplyIdx(parent, last);
+                                if let Some(last_reply) =
+                                    env.storage().persistent().get::<_, u64>(&last_idx_key)
+                                {
+                                    env.storage()
+                                        .persistent()
+                                        .set(&idx_key, &last_reply);
+                                    Self::bump(&env, &idx_key);
+                                }
+                                env.storage().persistent().remove(&last_idx_key);
+                            } else {
+                                env.storage().persistent().remove(&idx_key);
+                            }
+                            break;
+                        }
+                    }
+                }
+                let new_count = reply_count - 1;
+                if new_count == 0 {
+                    env.storage().persistent().remove(&StorageKey::ReplyCount(parent));
+                } else {
+                    env.storage()
+                        .persistent()
+                        .set(&StorageKey::ReplyCount(parent), &new_count);
+                    Self::bump(&env, &StorageKey::ReplyCount(parent));
+                }
+            }
+        }
+
+        // Remove threading metadata
+        env.storage()
+            .persistent()
+            .remove(&StorageKey::ParentPost(post_id));
+        env.storage()
+            .persistent()
+            .remove(&StorageKey::ThreadRoot(post_id));
+        env.storage()
+            .persistent()
+            .remove(&StorageKey::ThreadDepth(post_id));
+
+        // Remove post ID from author's posts list (top-level posts only)
         let author_key = StorageKey::AuthorPosts(author.clone());
         if let Some(mut author_posts) = env
             .storage()
@@ -1189,6 +1366,53 @@ impl LinkoraContract {
 
         Self::bump(&env, &key);
         paginate(&env, &posts, offset, limit)
+    }
+
+    /// Returns the IDs of replies to a post, paginated.
+    /// O(limit) — reads exactly `limit` storage keys regardless of total reply count.
+    pub fn get_replies(env: Env, post_id: u64, offset: u32, limit: u32) -> Vec<u64> {
+        assert!(
+            limit > 0 && limit <= MAX_PAGINATION_LIMIT,
+            "limit must be between 1 and 50"
+        );
+
+        let count: u32 = env
+            .storage()
+            .persistent()
+            .get(&StorageKey::ReplyCount(post_id))
+            .unwrap_or(0u32);
+
+        if offset >= count {
+            return Vec::new(&env);
+        }
+
+        let end = (offset + limit).min(count);
+        let mut result = Vec::new(&env);
+
+        for seq in offset..end {
+            let idx_key = StorageKey::ReplyIdx(post_id, seq);
+            if let Some(reply_id) = env.storage().persistent().get::<_, u64>(&idx_key) {
+                Self::bump(&env, &idx_key);
+                result.push_back(reply_id);
+            }
+        }
+
+        result
+    }
+
+    /// Returns the total number of replies to a post.
+    pub fn get_reply_count(env: Env, post_id: u64) -> u32 {
+        env.storage()
+            .persistent()
+            .get(&StorageKey::ReplyCount(post_id))
+            .unwrap_or(0u32)
+    }
+
+    /// Returns the root post ID of a reply chain (or the post itself if top-level).
+    pub fn get_thread_root(env: Env, post_id: u64) -> Option<u64> {
+        env.storage()
+            .persistent()
+            .get(&StorageKey::ThreadRoot(post_id))
     }
 
     // ── Reactions ─────────────────────────────────────────────────────────────
@@ -2334,6 +2558,70 @@ impl LinkoraContract {
                 if let Some(post) = env.storage().persistent().get::<_, Post>(&post_key) {
                     let author = post.author.clone();
                     env.storage().persistent().remove(&post_key);
+
+                    // ── Threading cleanup (ADR-008) ─────────────────────────
+                    let parent: u64 = env
+                        .storage()
+                        .persistent()
+                        .get(&StorageKey::ParentPost(post_id))
+                        .unwrap_or(0u64);
+                    if parent != 0 {
+                        let reply_count: u32 = env
+                            .storage()
+                            .persistent()
+                            .get(&StorageKey::ReplyCount(parent))
+                            .unwrap_or(0u32);
+                        if reply_count > 0 {
+                            for seq in 0..reply_count {
+                                let idx_key = StorageKey::ReplyIdx(parent, seq);
+                                if let Some(reply_id) =
+                                    env.storage().persistent().get::<_, u64>(&idx_key)
+                                {
+                                    if reply_id == post_id {
+                                        let last = reply_count - 1;
+                                        if seq != last {
+                                            let last_idx_key =
+                                                StorageKey::ReplyIdx(parent, last);
+                                            if let Some(last_reply) =
+                                                env.storage()
+                                                    .persistent()
+                                                    .get::<_, u64>(&last_idx_key)
+                                            {
+                                                env.storage()
+                                                    .persistent()
+                                                    .set(&idx_key, &last_reply);
+                                                Self::bump(&env, &idx_key);
+                                            }
+                                            env.storage().persistent().remove(&last_idx_key);
+                                        } else {
+                                            env.storage().persistent().remove(&idx_key);
+                                        }
+                                        break;
+                                    }
+                                }
+                            }
+                            let new_count = reply_count - 1;
+                            if new_count == 0 {
+                                env.storage()
+                                    .persistent()
+                                    .remove(&StorageKey::ReplyCount(parent));
+                            } else {
+                                env.storage()
+                                    .persistent()
+                                    .set(&StorageKey::ReplyCount(parent), &new_count);
+                                Self::bump(&env, &StorageKey::ReplyCount(parent));
+                            }
+                        }
+                    }
+                    env.storage()
+                        .persistent()
+                        .remove(&StorageKey::ParentPost(post_id));
+                    env.storage()
+                        .persistent()
+                        .remove(&StorageKey::ThreadRoot(post_id));
+                    env.storage()
+                        .persistent()
+                        .remove(&StorageKey::ThreadDepth(post_id));
 
                     let author_key = StorageKey::AuthorPosts(author.clone());
                     if let Some(mut author_posts) = env

@@ -22,7 +22,7 @@ describe("Post Event Handlers", () => {
   });
 
   describe("handlePostCreated", () => {
-    it("should insert a new post", async () => {
+    it("should insert a new top-level post", async () => {
       const { event, context } = createMockPostCreatedEvent(1n, "GTEST123");
       mockQuery.mockResolvedValueOnce({ rowCount: 1 });
 
@@ -30,7 +30,19 @@ describe("Post Event Handlers", () => {
 
       expect(mockQuery).toHaveBeenCalledWith(
         expect.stringContaining("INSERT INTO posts"),
-        expect.arrayContaining(["1", "GTEST123", "Test post content", 0, 0, context.timestamp])
+        expect.arrayContaining(["1", "GTEST123", "Test post content", 0, 0, context.timestamp, null, "1"])
+      );
+    });
+
+    it("should insert a reply post with parent_id", async () => {
+      const { event, context } = createMockPostCreatedEvent(2n, "GTEST456", 1n);
+      mockQuery.mockResolvedValueOnce({ rowCount: 1 });
+
+      await handlePostCreated(mockPool, event, context);
+
+      expect(mockQuery).toHaveBeenCalledWith(
+        expect.stringContaining("INSERT INTO posts"),
+        expect.arrayContaining(["2", "GTEST456", "Test post content", 0, 0, context.timestamp, "1", "1"])
       );
     });
 

@@ -8,6 +8,8 @@ import { Pool } from "pg";
 export interface PostCreatedEvent {
   id: bigint;
   author: string;
+  parent_id?: bigint | null;
+  root_id?: bigint | null;
 }
 
 export interface PostDeletedEvent {
@@ -32,15 +34,19 @@ export async function handlePostCreated(
   event: PostCreatedEvent,
   context: PostEventContext
 ): Promise<void> {
-  const { id, author } = event;
+  const { id, author, parent_id, root_id } = event;
   const { timestamp, content } = context;
 
   // Fetch content from contract state if not provided
   const postContent = content || "";
 
+  // root_id is provided by the contract event (ADR-008).
+  // For top-level posts, root_id = id. For replies, root_id = thread root.
+  const rootId = root_id != null ? root_id.toString() : null;
+
   const query = `
-    INSERT INTO posts (id, author, content, tip_total, like_count, created_at)
-    VALUES ($1, $2, $3, $4, $5, $6)
+    INSERT INTO posts (id, author, content, tip_total, like_count, created_at, parent_id, root_id)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
     ON CONFLICT (id) DO NOTHING
   `;
 
@@ -51,6 +57,8 @@ export async function handlePostCreated(
     0, // Initial tip_total
     0, // Initial like_count
     timestamp,
+    parent_id != null ? parent_id.toString() : null,
+    rootId,
   ];
 
   try {
@@ -121,10 +129,17 @@ export async function fetchPostContent(_contractId: string, _postId: bigint): Pr
  */
 export function createMockPostCreatedEvent(
   id: bigint = 1n,
-  author: string = "GXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+  author: string = "GXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+  parentId?: bigint | null,
+  rootId?: bigint | null
 ): { event: PostCreatedEvent; context: PostEventContext } {
   return {
-    event: { id, author },
+    event: {
+      id,
+      author,
+      parent_id: parentId ?? null,
+      root_id: rootId ?? (parentId != null ? 1n : id),
+    },
     context: {
       txHash: "0x1234567890abcdef",
       ledgerSeq: 12345,

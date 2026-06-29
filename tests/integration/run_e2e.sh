@@ -132,6 +132,15 @@ POST_ID="$(stellar --config-dir "$CFG_DIR" contract invoke \
 
 POST_ID="$(echo "$POST_ID" | tr -d '[:space:]')"
 
+echo "  Creating reply post with parent-id..."
+REPLY_ID="$(stellar --config-dir "$CFG_DIR" contract invoke \
+  --network "$NETWORK" \
+  --source-account linkora_bob \
+  --id "$CONTRACT_ID" \
+  -- create_post --author "$BOB_ADDR" --content "reply-from-bob" --parent-id "$POST_ID")"
+
+REPLY_ID="$(echo "$REPLY_ID" | tr -d '[:space:]')"
+
 echo "[6/8] Running tip and pool flows against SAC token..."
 stellar --config-dir "$CFG_DIR" contract invoke \
   --network "$NETWORK" \
@@ -176,6 +185,26 @@ POST_STATE="$(stellar --config-dir "$CFG_DIR" contract invoke \
 
 assert_contains "post tip amount is 1000" "1000" "$POST_STATE"
 assert_contains "post content is hello-from-e2e" "hello-from-e2e" "$POST_STATE"
+
+echo "  Verifying reply post..."
+REPLY_STATE="$(stellar --config-dir "$CFG_DIR" contract invoke \
+  --network "$NETWORK" \
+  --source-account linkora_bob \
+  --id "$CONTRACT_ID" \
+  --send no \
+  -- get_post --id "$REPLY_ID")"
+
+assert_contains "reply content" "reply-from-bob" "$REPLY_STATE"
+
+echo "  Verifying get_replies for parent post..."
+REPLIES="$(stellar --config-dir "$CFG_DIR" contract invoke \
+  --network "$NETWORK" \
+  --source-account linkora_alice \
+  --id "$CONTRACT_ID" \
+  --send no \
+  -- get_replies --post-id "$POST_ID" --offset 0 --limit 10)"
+
+assert_contains "reply appears in get_replies" "$REPLY_ID" "$REPLIES"
 
 POOL_STATE="$(stellar --config-dir "$CFG_DIR" contract invoke \
   --network "$NETWORK" \

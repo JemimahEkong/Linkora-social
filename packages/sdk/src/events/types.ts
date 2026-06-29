@@ -41,6 +41,8 @@ export interface PostCreatedEvent extends BaseLinkoraEvent {
   type: "post_created";
   id: number;
   author: string;
+  parent_id?: number;
+  root_id?: number;
 }
 
 export interface PostDeletedEvent extends BaseLinkoraEvent {
@@ -256,6 +258,8 @@ export function parseContractEvent(raw: SorobanEvent): LinkoraEvent | null {
           type: eventType,
           id: num(payload.id),
           author: str(payload.author),
+          parent_id: payload.parent_id != null ? num(payload.parent_id) : undefined,
+          root_id: payload.root_id != null ? num(payload.root_id) : undefined,
           meta: eventMeta,
         };
       case "post_deleted":

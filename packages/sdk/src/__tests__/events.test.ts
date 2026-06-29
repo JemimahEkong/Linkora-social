@@ -102,6 +102,35 @@ describe("parseContractEvent", () => {
     expect(evt.type).toBe("post_created");
     expect(evt.id).toBe(42);
     expect(evt.author).toBe("GAUTHOR");
+    expect(evt.parent_id).toBeUndefined();
+  });
+
+  it("decodes PostCreatedEvent with parent_id", () => {
+    const raw = rawEvent({
+      topics: [enc("post_created")],
+      data: enc({ id: 43, author: "GAUTHOR", parent_id: 10 }),
+    });
+    const evt = parseContractEvent(raw) as Extract<LinkoraEvent, { type: "post_created" }>;
+    expect(evt).not.toBeNull();
+    expect(evt.type).toBe("post_created");
+    expect(evt.id).toBe(43);
+    expect(evt.author).toBe("GAUTHOR");
+    expect(evt.parent_id).toBe(10);
+    expect(evt.root_id).toBeUndefined();
+  });
+
+  it("decodes PostCreatedEvent with parent_id and root_id", () => {
+    const raw = rawEvent({
+      topics: [enc("post_created")],
+      data: enc({ id: 44, author: "GAUTHOR", parent_id: 10, root_id: 1 }),
+    });
+    const evt = parseContractEvent(raw) as Extract<LinkoraEvent, { type: "post_created" }>;
+    expect(evt).not.toBeNull();
+    expect(evt.type).toBe("post_created");
+    expect(evt.id).toBe(44);
+    expect(evt.author).toBe("GAUTHOR");
+    expect(evt.parent_id).toBe(10);
+    expect(evt.root_id).toBe(1);
   });
 
   it("decodes PostDeletedEvent", () => {

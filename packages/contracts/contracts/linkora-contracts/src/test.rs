@@ -214,7 +214,7 @@ fn test_get_posts_by_author_first_page() {
         } else {
             String::from_str(&env, "post 9")
         };
-        client.create_post(&author, &post_str);
+        client.create_post(&author, &post_str, &None);
     }
 
     let page = client.get_posts_by_author(&author, &0, &5);
@@ -254,7 +254,7 @@ fn test_get_posts_by_author_second_page() {
         } else {
             String::from_str(&env, "post 9")
         };
-        client.create_post(&author, &post_str);
+        client.create_post(&author, &post_str, &None);
     }
 
     let page = client.get_posts_by_author(&author, &5, &5);
@@ -272,7 +272,7 @@ fn test_get_posts_by_author_offset_beyond_end() {
 
     let author = Address::generate(&env);
 
-    client.create_post(&author, &String::from_str(&env, "post 1"));
+    client.create_post(&author, &String::from_str(&env, "post 1"), &None);
 
     let page = client.get_posts_by_author(&author, &10, &10);
     assert_eq!(page.len(), 0);
@@ -288,7 +288,7 @@ fn test_get_posts_by_author_limit_exceeds_maximum() {
 
     let author = Address::generate(&env);
 
-    client.create_post(&author, &String::from_str(&env, "post 1"));
+    client.create_post(&author, &String::from_str(&env, "post 1"), &None);
 
     client.get_posts_by_author(&author, &0, &51);
 }
@@ -302,9 +302,9 @@ fn test_get_posts_by_author_after_delete() {
 
     let author = Address::generate(&env);
 
-    let id1 = client.create_post(&author, &String::from_str(&env, "post 1"));
-    let id2 = client.create_post(&author, &String::from_str(&env, "post 2"));
-    let id3 = client.create_post(&author, &String::from_str(&env, "post 3"));
+    let id1 = client.create_post(&author, &String::from_str(&env, "post 1"), &None);
+    let id2 = client.create_post(&author, &String::from_str(&env, "post 2"), &None);
+    let id3 = client.create_post(&author, &String::from_str(&env, "post 3"), &None);
 
     // Delete middle post
     client.delete_post(&author, &id2);
@@ -351,7 +351,7 @@ fn test_tip_fee_split() {
     client.initialize(&admin, &treasury, &250);
 
     let token = setup_token(&env, &tipper);
-    let post_id = client.create_post(&author, &String::from_str(&env, "Fee test post"));
+    let post_id = client.create_post(&author, &String::from_str(&env, "Fee test post"), &None);
 
     // Tip 1000 units
     client.tip(&tipper, &post_id, &token, &1000);
@@ -383,7 +383,7 @@ fn test_tip_blocked_by_author() {
     client.initialize(&admin, &treasury, &250);
 
     let token = setup_token(&env, &tipper);
-    let post_id = client.create_post(&author, &String::from_str(&env, "Test post"));
+    let post_id = client.create_post(&author, &String::from_str(&env, "Test post"), &None);
 
     // Author blocks tipper
     client.block_user(&author, &tipper);
@@ -408,7 +408,7 @@ fn test_tip_after_unblock() {
     client.initialize(&admin, &treasury, &250);
 
     let token = setup_token(&env, &tipper);
-    let post_id = client.create_post(&author, &String::from_str(&env, "Test post"));
+    let post_id = client.create_post(&author, &String::from_str(&env, "Test post"), &None);
 
     // Author blocks tipper
     client.block_user(&author, &tipper);
@@ -442,7 +442,7 @@ fn test_tip_non_blocked_user() {
     let token = setup_token(&env, &tipper1);
     StellarAssetClient::new(&env, &token).mint(&tipper2, &5000);
 
-    let post_id = client.create_post(&author, &String::from_str(&env, "Test post"));
+    let post_id = client.create_post(&author, &String::from_str(&env, "Test post"), &None);
 
     // Author blocks tipper1
     client.block_user(&author, &tipper1);
@@ -482,8 +482,8 @@ fn test_post_count() {
     let (client, _, _) = setup_contract(&env);
 
     let author = Address::generate(&env);
-    client.create_post(&author, &String::from_str(&env, "Post 1"));
-    client.create_post(&author, &String::from_str(&env, "Post 2"));
+    client.create_post(&author, &String::from_str(&env, "Post 1"), &None);
+    client.create_post(&author, &String::from_str(&env, "Post 2"), &None);
 
     assert_eq!(client.get_post_count(), 2);
 }
@@ -495,8 +495,8 @@ fn test_post_count_not_decremented_on_delete() {
     let (client, _, _) = setup_contract(&env);
 
     let author = Address::generate(&env);
-    let post_id1 = client.create_post(&author, &String::from_str(&env, "Post 1"));
-    let post_id2 = client.create_post(&author, &String::from_str(&env, "Post 2"));
+    let post_id1 = client.create_post(&author, &String::from_str(&env, "Post 1"), &None);
+    let post_id2 = client.create_post(&author, &String::from_str(&env, "Post 2"), &None);
 
     assert_eq!(client.get_post_count(), 2);
 
@@ -565,7 +565,7 @@ fn test_like_post() {
 
     let author = Address::generate(&env);
     let user = Address::generate(&env);
-    let post_id = client.create_post(&author, &String::from_str(&env, "Like test"));
+    let post_id = client.create_post(&author, &String::from_str(&env, "Like test"), &None);
 
     client.like_post(&user, &post_id);
     assert_eq!(client.get_like_count(&post_id), 1);
@@ -584,7 +584,7 @@ fn test_like_post_emits_event_on_first_like() {
 
     let author = Address::generate(&env);
     let user = Address::generate(&env);
-    let post_id = client.create_post(&author, &String::from_str(&env, "Event test"));
+    let post_id = client.create_post(&author, &String::from_str(&env, "Event test"), &None);
 
     client.like_post(&user, &post_id);
 
@@ -603,7 +603,7 @@ fn test_like_post_no_event_on_duplicate() {
     let author = Address::generate(&env);
     let user1 = Address::generate(&env);
     let user2 = Address::generate(&env);
-    let post_id = client.create_post(&author, &String::from_str(&env, "Duplicate event test"));
+    let post_id = client.create_post(&author, &String::from_str(&env, "Duplicate event test"), &None);
 
     client.like_post(&user1, &post_id);
     let like_count_after_first = client.get_like_count(&post_id);
@@ -862,7 +862,7 @@ fn test_sequential_posts() {
     env.ledger().set_timestamp(ts1);
 
     // Create first post
-    let post_id1 = client.create_post(&author, &String::from_str(&env, "First post"));
+    let post_id1 = client.create_post(&author, &String::from_str(&env, "First post"), &None);
     assert_eq!(post_id1, 1);
 
     let post1 = client.get_post(&post_id1).unwrap();
@@ -874,7 +874,7 @@ fn test_sequential_posts() {
     env.ledger().set_timestamp(ts2);
 
     // Create second post
-    let post_id2 = client.create_post(&author, &String::from_str(&env, "Second post"));
+    let post_id2 = client.create_post(&author, &String::from_str(&env, "Second post"), &None);
     assert_eq!(post_id2, 2);
 
     let post2 = client.get_post(&post_id2).unwrap();
@@ -1224,7 +1224,7 @@ fn test_post_content_empty() {
     let author = Address::generate(&env);
 
     // Empty content should panic
-    client.create_post(&author, &String::from_str(&env, ""));
+    client.create_post(&author, &String::from_str(&env, ""), &None);
 }
 
 #[test]
@@ -1236,7 +1236,7 @@ fn test_post_content_min_length_valid() {
     let author = Address::generate(&env);
 
     // 1-character content should succeed
-    let post_id = client.create_post(&author, &String::from_str(&env, "a"));
+    let post_id = client.create_post(&author, &String::from_str(&env, "a"), &None);
     let post = client.get_post(&post_id).unwrap();
     assert_eq!(post.content, String::from_str(&env, "a"));
 }
@@ -1253,7 +1253,7 @@ fn test_post_content_max_length_valid() {
     let content_str = "a".repeat(280);
     let content = String::from_str(&env, &content_str);
     assert_eq!(content.len(), 280);
-    let post_id = client.create_post(&author, &content);
+    let post_id = client.create_post(&author, &content, &None);
     let post = client.get_post(&post_id).unwrap();
     assert_eq!(post.content, content);
 }
@@ -1271,7 +1271,7 @@ fn test_post_content_too_long() {
     let content_str = "a".repeat(281);
     let content = String::from_str(&env, &content_str);
     assert_eq!(content.len(), 281);
-    client.create_post(&author, &content);
+    client.create_post(&author, &content, &None);
 }
 
 // ── get_followers / get_following TTL tests ───────────────────────────────────
@@ -1497,7 +1497,7 @@ fn test_create_post_content_1_char_succeeds() {
     let (client, _, _) = setup_contract(&env);
 
     let author = Address::generate(&env);
-    let post_id = client.create_post(&author, &String::from_str(&env, "x"));
+    let post_id = client.create_post(&author, &String::from_str(&env, "x"), &None);
     let post = client.get_post(&post_id).unwrap();
     assert_eq!(post.content, String::from_str(&env, "x"));
     assert_eq!(post.author, author);
@@ -1515,7 +1515,7 @@ fn test_create_post_content_280_chars_succeeds() {
     let content = String::from_str(&env, &content_str);
     assert_eq!(content.len(), 280);
 
-    let post_id = client.create_post(&author, &content);
+    let post_id = client.create_post(&author, &content, &None);
     let post = client.get_post(&post_id).unwrap();
     assert_eq!(post.content.len(), 280);
 }
@@ -1529,7 +1529,7 @@ fn test_create_post_empty_content_panics() {
     let (client, _, _) = setup_contract(&env);
 
     let author = Address::generate(&env);
-    client.create_post(&author, &String::from_str(&env, ""));
+    client.create_post(&author, &String::from_str(&env, ""), &None);
 }
 
 #[test]
@@ -1544,7 +1544,7 @@ fn test_create_post_content_281_chars_panics() {
     let content_str = "a".repeat(281);
     let content = String::from_str(&env, &content_str);
     assert_eq!(content.len(), 281);
-    client.create_post(&author, &content);
+    client.create_post(&author, &content, &None);
 }
 
 // ── Pool withdrawal M-of-N integration tests ─────────────────────────────────
@@ -1780,7 +1780,7 @@ fn test_tip_full_flow_no_fee() {
     client.initialize(&admin, &treasury, &0);
 
     let token = setup_token(&env, &tipper);
-    let post_id = client.create_post(&author, &String::from_str(&env, "No-fee tip test"));
+    let post_id = client.create_post(&author, &String::from_str(&env, "No-fee tip test"), &None);
 
     let tip_amount: i128 = 1000;
     client.tip(&tipper, &post_id, &token, &tip_amount);
@@ -1824,7 +1824,7 @@ fn test_tip_full_flow_with_5_percent_fee() {
     client.initialize(&admin, &treasury, &500);
 
     let token = setup_token(&env, &tipper);
-    let post_id = client.create_post(&author, &String::from_str(&env, "5% fee tip test"));
+    let post_id = client.create_post(&author, &String::from_str(&env, "5% fee tip test"), &None);
 
     let tip_amount: i128 = 1000;
     client.tip(&tipper, &post_id, &token, &tip_amount);
@@ -1875,7 +1875,7 @@ fn test_tip_total_increments_across_multiple_tips() {
     // Mint tokens for tipper2 as well
     StellarAssetClient::new(&env, &token).mint(&tipper2, &5000);
 
-    let post_id = client.create_post(&author, &String::from_str(&env, "Multi-tip test"));
+    let post_id = client.create_post(&author, &String::from_str(&env, "Multi-tip test"), &None);
 
     // First tip from tipper1 (advance ledger to bypass cooldown)
     client.tip(&tipper1, &post_id, &token, &400);
@@ -1908,7 +1908,7 @@ fn test_tip_fee_split_matches_fee_bps_config() {
     client.initialize(&admin, &treasury, &250);
 
     let token = setup_token(&env, &tipper);
-    let post_id = client.create_post(&author, &String::from_str(&env, "Fee split config test"));
+    let post_id = client.create_post(&author, &String::from_str(&env, "Fee split config test"), &None);
 
     let tip_amount: i128 = 2000;
     client.tip(&tipper, &post_id, &token, &tip_amount);
@@ -2136,7 +2136,7 @@ fn test_delete_post_success() {
     let (client, _, _) = setup_contract(&env);
 
     let author = Address::generate(&env);
-    let post_id = client.create_post(&author, &String::from_str(&env, "Hello world"));
+    let post_id = client.create_post(&author, &String::from_str(&env, "Hello world"), &None);
 
     client.delete_post(&author, &post_id);
 
@@ -2155,7 +2155,7 @@ fn test_delete_post_non_author_panics() {
 
     let author = Address::generate(&env);
     let non_author = Address::generate(&env);
-    let post_id = client.create_post(&author, &String::from_str(&env, "Hello world"));
+    let post_id = client.create_post(&author, &String::from_str(&env, "Hello world"), &None);
 
     client.delete_post(&non_author, &post_id);
 }
@@ -2167,7 +2167,7 @@ fn test_delete_post_emits_post_deleted_event() {
     let (client, _, _) = setup_contract(&env);
 
     let author = Address::generate(&env);
-    let post_id = client.create_post(&author, &String::from_str(&env, "Event test"));
+    let post_id = client.create_post(&author, &String::from_str(&env, "Event test"), &None);
 
     client.delete_post(&author, &post_id);
 
@@ -2186,8 +2186,8 @@ fn test_delete_post_get_post_count_unaffected() {
     let (client, _, _) = setup_contract(&env);
 
     let author = Address::generate(&env);
-    client.create_post(&author, &String::from_str(&env, "Post 1"));
-    let post_id2 = client.create_post(&author, &String::from_str(&env, "Post 2"));
+    client.create_post(&author, &String::from_str(&env, "Post 1"), &None);
+    let post_id2 = client.create_post(&author, &String::from_str(&env, "Post 2"), &None);
 
     assert_eq!(client.get_post_count(), 2);
     client.delete_post(&author, &post_id2);
@@ -2207,7 +2207,7 @@ fn test_delete_post_emits_event() {
     let (client, _, _) = setup_contract(&env);
 
     let author = Address::generate(&env);
-    let post_id = client.create_post(&author, &String::from_str(&env, "post to delete"));
+    let post_id = client.create_post(&author, &String::from_str(&env, "post to delete"), &None);
 
     client.delete_post(&author, &post_id);
 
@@ -2228,7 +2228,7 @@ fn test_delete_post_unauthorized_no_event() {
 
     let author = Address::generate(&env);
     let non_author = Address::generate(&env);
-    let post_id = client.create_post(&author, &String::from_str(&env, "test post"));
+    let post_id = client.create_post(&author, &String::from_str(&env, "test post"), &None);
 
     // Panics before event emission — PostDeleted is never emitted
     client.delete_post(&non_author, &post_id);
@@ -2293,7 +2293,7 @@ fn test_tip_cooldown_rejects_within_window() {
     client.set_tip_cooldown_window(&10);
 
     let token = setup_token(&env, &tipper);
-    let post_id = client.create_post(&author, &String::from_str(&env, "cooldown test post"));
+    let post_id = client.create_post(&author, &String::from_str(&env, "cooldown test post"), &None);
 
     client.tip(&tipper, &post_id, &token, &100);
     // Same ledger → cooldown not expired → panics
@@ -2317,7 +2317,7 @@ fn test_tip_cooldown_allows_after_window() {
     client.set_tip_cooldown_window(&10);
 
     let token = setup_token(&env, &tipper);
-    let post_id = client.create_post(&author, &String::from_str(&env, "cooldown test post"));
+    let post_id = client.create_post(&author, &String::from_str(&env, "cooldown test post"), &None);
 
     client.tip(&tipper, &post_id, &token, &100);
 
@@ -2514,7 +2514,7 @@ fn test_tip_cooldown_uses_typed_storage_key() {
     client.set_tip_cooldown_window(&100);
 
     let token = setup_token(&env, &tipper);
-    let post_id = client.create_post(&author, &String::from_str(&env, "cooldown key test"));
+    let post_id = client.create_post(&author, &String::from_str(&env, "cooldown key test"), &None);
 
     // First tip succeeds and records the cooldown under StorageKey::TipCooldown.
     client.tip(&tipper, &post_id, &token, &50);
@@ -3496,7 +3496,7 @@ fn test_moderation_happy_path_uphold() {
     client.gov_execute(&proposal_id);
 
     // Create post
-    let post_id = client.create_post(&author, &String::from_str(&env, "bad content"));
+    let post_id = client.create_post(&author, &String::from_str(&env, "bad content"), &None);
 
     // Report post
     let reason_hash = BytesN::from_array(&env, &[1u8; 32]);
@@ -3547,7 +3547,7 @@ fn test_moderation_dismiss() {
     let reporter = Address::generate(&env);
     StellarAssetClient::new(&env, &token).mint(&reporter, &1000);
 
-    let post_id = client.create_post(&author, &String::from_str(&env, "good content"));
+    let post_id = client.create_post(&author, &String::from_str(&env, "good content"), &None);
 
     let reason_hash = BytesN::from_array(&env, &[2u8; 32]);
     client.report_post(&reporter, &post_id, &token, &100, &reason_hash);
@@ -3577,7 +3577,7 @@ fn test_moderation_double_report_panics() {
     let reporter = Address::generate(&env);
     let token = setup_token(&env, &reporter);
 
-    let post_id = client.create_post(&author, &String::from_str(&env, "content"));
+    let post_id = client.create_post(&author, &String::from_str(&env, "content"), &None);
     let reason_hash = BytesN::from_array(&env, &[3u8; 32]);
 
     client.report_post(&reporter, &post_id, &token, &100, &reason_hash);
@@ -3603,7 +3603,7 @@ fn test_moderation_unauthorized_review_panics() {
     let reporter = Address::generate(&env);
     StellarAssetClient::new(&env, &token).mint(&reporter, &1000);
 
-    let post_id = client.create_post(&author, &String::from_str(&env, "content"));
+    let post_id = client.create_post(&author, &String::from_str(&env, "content"), &None);
     let reason_hash = BytesN::from_array(&env, &[4u8; 32]);
     client.report_post(&reporter, &post_id, &token, &100, &reason_hash);
 
@@ -3622,7 +3622,7 @@ fn test_moderation_cannot_report_own_post() {
     let author = Address::generate(&env);
     let token = setup_token(&env, &author);
 
-    let post_id = client.create_post(&author, &String::from_str(&env, "own content"));
+    let post_id = client.create_post(&author, &String::from_str(&env, "own content"), &None);
     let reason_hash = BytesN::from_array(&env, &[5u8; 32]);
 
     client.report_post(&author, &post_id, &token, &100, &reason_hash);
@@ -3645,7 +3645,7 @@ fn test_moderation_review_already_deleted_post() {
     let reporter = Address::generate(&env);
     StellarAssetClient::new(&env, &token).mint(&reporter, &1000);
 
-    let post_id = client.create_post(&author, &String::from_str(&env, "content to delete"));
+    let post_id = client.create_post(&author, &String::from_str(&env, "content to delete"), &None);
     let reason_hash = BytesN::from_array(&env, &[6u8; 32]);
 
     client.report_post(&reporter, &post_id, &token, &100, &reason_hash);
@@ -3661,4 +3661,303 @@ fn test_moderation_review_already_deleted_post() {
 
     let report_after = client.get_report(&post_id, &reporter).unwrap();
     assert_eq!(report_after.status, ReportStatus::Upheld);
+}
+
+// ── Post Threading Tests (ADR-008) ─────────────────────────────────────────
+
+#[test]
+fn test_create_reply_top_level() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _) = setup_contract(&env);
+
+    let author = Address::generate(&env);
+    let replier = Address::generate(&env);
+
+    // Create top-level post
+    let parent_id = client.create_post(&author, &String::from_str(&env, "parent post"), &None);
+
+    // Create reply
+    let reply_id =
+        client.create_post(&replier, &String::from_str(&env, "reply"), &Some(parent_id));
+
+    // Verify reply appears in get_replies
+    let replies = client.get_replies(&parent_id, &0, &10);
+    assert_eq!(replies.len(), 1);
+    assert_eq!(replies.get(0).unwrap(), reply_id);
+
+    // Verify original post still accessible
+    let parent = client.get_post(&parent_id).unwrap();
+    assert_eq!(parent.content, String::from_str(&env, "parent post"));
+}
+
+#[test]
+fn test_create_nested_reply() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _) = setup_contract(&env);
+
+    let author = Address::generate(&env);
+
+    // Create chain: post -> reply1 -> reply2 -> reply3
+    let post_id = client.create_post(&author, &String::from_str(&env, "root"), &None);
+    let reply1 = client.create_post(&author, &String::from_str(&env, "l1"), &Some(post_id));
+    let reply2 = client.create_post(&author, &String::from_str(&env, "l2"), &Some(reply1));
+    let reply3 = client.create_post(&author, &String::from_str(&env, "l3"), &Some(reply2));
+
+    // Each parent's reply list should contain exactly the direct child
+    assert_eq!(client.get_replies(&post_id, &0, &10).get(0).unwrap(), reply1);
+    assert_eq!(client.get_replies(&reply1, &0, &10).get(0).unwrap(), reply2);
+    assert_eq!(client.get_replies(&reply2, &0, &10).get(0).unwrap(), reply3);
+
+    // Verify all posts are individually accessible
+    assert_eq!(client.get_post(&reply3).unwrap().content, String::from_str(&env, "l3"));
+}
+
+#[test]
+#[should_panic(expected = "parent post does not exist")]
+fn test_create_reply_nonexistent_parent_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _) = setup_contract(&env);
+
+    let author = Address::generate(&env);
+
+    // Try to reply to a non-existent parent post
+    client.create_post(&author, &String::from_str(&env, "orphan reply"), &Some(99999));
+}
+
+#[test]
+#[should_panic(expected = "max thread depth exceeded")]
+fn test_max_thread_depth_exceeded_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _) = setup_contract(&env);
+
+    let author = Address::generate(&env);
+
+    // MAX_THREAD_DEPTH = 5
+    let p0 = client.create_post(&author, &String::from_str(&env, "p0"), &None);
+    let p1 = client.create_post(&author, &String::from_str(&env, "p1"), &Some(p0));
+    let p2 = client.create_post(&author, &String::from_str(&env, "p2"), &Some(p1));
+    let p3 = client.create_post(&author, &String::from_str(&env, "p3"), &Some(p2));
+    let p4 = client.create_post(&author, &String::from_str(&env, "p4"), &Some(p3));
+    let p5 = client.create_post(&author, &String::from_str(&env, "p5"), &Some(p4));
+
+    // p5 has depth 5 which equals MAX_THREAD_DEPTH, so p6 at depth 6 should panic
+    client.create_post(&author, &String::from_str(&env, "p6 too deep"), &Some(p5));
+}
+
+#[test]
+fn test_get_replies_pagination() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _) = setup_contract(&env);
+
+    let author = Address::generate(&env);
+
+    // Create top-level post
+    let parent_id = client.create_post(&author, &String::from_str(&env, "parent"), &None);
+
+    // Create 100 replies
+    let mut reply_ids = Vec::new(&env);
+    for i in 1..=100 {
+        let content = format!("reply {}", i);
+        let rid = client.create_post(&author, &String::from_str(&env, &content), &Some(parent_id));
+        reply_ids.push_back(rid);
+    }
+
+    // Verify total reply count
+    assert_eq!(client.get_reply_count(&parent_id), 100);
+
+    // Page 1: first 30 replies
+    let page1 = client.get_replies(&parent_id, &0, &30);
+    assert_eq!(page1.len(), 30);
+    for i in 0..30 {
+        assert_eq!(page1.get(i).unwrap(), reply_ids.get(i).unwrap());
+    }
+
+    // Page 2: next 30 replies
+    let page2 = client.get_replies(&parent_id, &30, &30);
+    assert_eq!(page2.len(), 30);
+    for i in 0..30 {
+        assert_eq!(page2.get(i).unwrap(), reply_ids.get(i + 30).unwrap());
+    }
+
+    // Page 3: next 30 replies
+    let page3 = client.get_replies(&parent_id, &60, &30);
+    assert_eq!(page3.len(), 30);
+
+    // Page 4: remaining 10 replies
+    let page4 = client.get_replies(&parent_id, &90, &30);
+    assert_eq!(page4.len(), 10);
+    for i in 0..10 {
+        assert_eq!(page4.get(i).unwrap(), reply_ids.get(i + 90).unwrap());
+    }
+
+    // No more pages (empty)
+    let page5 = client.get_replies(&parent_id, &100, &30);
+    assert_eq!(page5.len(), 0);
+}
+
+#[test]
+fn test_get_replies_offset_beyond_end() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _) = setup_contract(&env);
+
+    let author = Address::generate(&env);
+
+    let parent_id = client.create_post(&author, &String::from_str(&env, "parent"), &None);
+
+    for i in 1..=5 {
+        let content = format!("reply {}", i);
+        client.create_post(&author, &String::from_str(&env, &content), &Some(parent_id));
+    }
+
+    // Offset beyond total count should return empty vec
+    let replies = client.get_replies(&parent_id, &10, &10);
+    assert_eq!(replies.len(), 0);
+
+    // Offset at exact count should also return empty
+    let replies = client.get_replies(&parent_id, &5, &10);
+    assert_eq!(replies.len(), 0);
+}
+
+#[test]
+fn test_reply_count_accuracy() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _) = setup_contract(&env);
+
+    let author = Address::generate(&env);
+
+    let parent_id = client.create_post(&author, &String::from_str(&env, "parent"), &None);
+
+    // Initial count should be 0
+    assert_eq!(client.get_reply_count(&parent_id), 0);
+
+    // Add replies and verify count after each
+    let r1 = client.create_post(&author, &String::from_str(&env, "r1"), &Some(parent_id));
+    assert_eq!(client.get_reply_count(&parent_id), 1);
+
+    let r2 = client.create_post(&author, &String::from_str(&env, "r2"), &Some(parent_id));
+    assert_eq!(client.get_reply_count(&parent_id), 2);
+
+    let _r3 = client.create_post(&author, &String::from_str(&env, "r3"), &Some(parent_id));
+    assert_eq!(client.get_reply_count(&parent_id), 3);
+
+    // Delete one reply and verify count decrements
+    client.delete_post(&author, &r1);
+    assert_eq!(client.get_reply_count(&parent_id), 2);
+
+    // Delete another
+    client.delete_post(&author, &r2);
+    assert_eq!(client.get_reply_count(&parent_id), 1);
+}
+
+#[test]
+fn test_get_thread_root_correctness() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _) = setup_contract(&env);
+
+    let author = Address::generate(&env);
+
+    // Create chain: root -> a -> b -> c
+    let root = client.create_post(&author, &String::from_str(&env, "root"), &None);
+    let a = client.create_post(&author, &String::from_str(&env, "a"), &Some(root));
+    let b = client.create_post(&author, &String::from_str(&env, "b"), &Some(a));
+    let c = client.create_post(&author, &String::from_str(&env, "c"), &Some(b));
+
+    // Top-level post: get_thread_root returns id
+    assert_eq!(client.get_thread_root(&root).unwrap(), root);
+
+    // All replies share the same root
+    assert_eq!(client.get_thread_root(&a).unwrap(), root);
+    assert_eq!(client.get_thread_root(&b).unwrap(), root);
+    assert_eq!(client.get_thread_root(&c).unwrap(), root);
+
+    // All replies to the root should be returned (only direct children)
+    let replies = client.get_replies(&root, &0, &10);
+    assert_eq!(replies.len(), 1);
+    assert_eq!(replies.get(0).unwrap(), a);
+
+    // Replies to 'a' should only include 'b'
+    let replies_a = client.get_replies(&a, &0, &10);
+    assert_eq!(replies_a.len(), 1);
+    assert_eq!(replies_a.get(0).unwrap(), b);
+
+    // Root itself is accessible
+    let root_post = client.get_post(&root).unwrap();
+    assert_eq!(root_post.content, String::from_str(&env, "root"));
+
+    // Non-existent post returns None
+    assert!(client.get_thread_root(&99999).is_none());
+}
+
+#[test]
+fn test_author_posts_excludes_replies() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _) = setup_contract(&env);
+
+    let author = Address::generate(&env);
+
+    let token = setup_token(&env, &author);
+    client.set_profile(&author, &String::from_str(&env, "threader"), &token);
+
+    // Create 3 top-level posts
+    let p1 = client.create_post(&author, &String::from_str(&env, "top1"), &None);
+    let p2 = client.create_post(&author, &String::from_str(&env, "top2"), &None);
+    let p3 = client.create_post(&author, &String::from_str(&env, "top3"), &None);
+
+    // Create replies to p1
+    let _r1 = client.create_post(&author, &String::from_str(&env, "reply to p1"), &Some(p1));
+    let _r2 = client.create_post(&author, &String::from_str(&env, "another reply"), &Some(p1));
+
+    // AuthorPosts should only contain the 3 top-level posts, not the 2 replies
+    let author_posts = client.get_posts_by_author(&author, &0, &10);
+    assert_eq!(author_posts.len(), 3);
+    assert!(author_posts.iter().any(|id| id == p1));
+    assert!(author_posts.iter().any(|id| id == p2));
+    assert!(author_posts.iter().any(|id| id == p3));
+}
+
+#[test]
+fn test_orphan_replies_after_parent_deletion() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _) = setup_contract(&env);
+
+    let author = Address::generate(&env);
+
+    // Create top-level post and a reply
+    let parent_id = client.create_post(&author, &String::from_str(&env, "parent"), &None);
+    let reply_id = client.create_post(&author, &String::from_str(&env, "child"), &Some(parent_id));
+
+    // Delete the parent post
+    client.delete_post(&author, &parent_id);
+
+    // The reply should still exist (orphan permitted)
+    let reply = client.get_post(&reply_id).unwrap();
+    assert_eq!(reply.content, String::from_str(&env, "child"));
+}
+
+#[test]
+fn test_create_reply_event_emitted() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _) = setup_contract(&env);
+
+    let author = Address::generate(&env);
+
+    // Check that creating a reply emits events (parent_id flows through PostCreatedEvent)
+    let post_id = client.create_post(&author, &String::from_str(&env, "top level"), &None);
+    let events_after_top = env.events().all().events().len();
+    assert!(events_after_top > 0);
+
+    let _reply_id = client.create_post(&author, &String::from_str(&env, "a reply"), &Some(post_id));
+    let events_after_reply = env.events().all().events().len();
+    assert!(events_after_reply > events_after_top);
 }

@@ -57,7 +57,21 @@ stellar events --topic-filter 'user' --contract-id <contract-addr>
 - `id: u64` (indexed)
 - `author: Address` (indexed)
 
+**Data:**
+- `parent_id: Option<u64>` (present only for replies)
+- `root_id: u64` (thread root ID; equals `id` for top-level posts)
+
 **Emitted by:** `create_post()`
+
+**Threading behavior:**
+- Top-level posts omit `parent_id` (null).
+- Replies include the parent post's `id` as `parent_id`.
+- `root_id` identifies the top-level post that started the thread.
+- The contract stores threading metadata in dedicated storage keys (`ParentPost`, `ThreadRoot`, `ThreadDepth`, `ReplyIdx`, `ReplyCount`), NOT in the `Post` struct.
+- `AuthorPosts` only indexes top-level posts; replies are excluded.
+- Maximum nesting depth is 5 (`MAX_THREAD_DEPTH`).
+- `get_replies(post_id, offset, limit)` provides O(limit) reply pagination.
+- Deleting a parent post does NOT cascade-delete child replies (orphans are permitted).
 
 ---
 

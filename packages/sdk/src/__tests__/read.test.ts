@@ -158,6 +158,45 @@ describe("LinkoraClient read methods", () => {
     });
   });
 
+  describe("getReplies", () => {
+    it("returns reply IDs with offset/limit", async () => {
+      success([1n, 2n, 3n]);
+      const result = await client.getReplies(10, 0, 10);
+      expect(result).toEqual([1, 2, 3]);
+      expect(mockCall).toHaveBeenCalledWith("get_replies", val(10), val(0), val(10));
+    });
+
+    it("returns empty array when null", async () => {
+      notFound();
+      expect(await client.getReplies(999, 0, 10)).toEqual([]);
+    });
+  });
+
+  describe("getReplyCount", () => {
+    it("returns count", async () => {
+      success(5);
+      expect(await client.getReplyCount(1)).toBe(5);
+    });
+
+    it("returns 0 when null", async () => {
+      notFound();
+      expect(await client.getReplyCount(1)).toBe(0);
+    });
+  });
+
+  describe("getThreadRoot", () => {
+    it("returns root id", async () => {
+      success(1);
+      expect(await client.getThreadRoot(3)).toBe(1);
+      expect(mockCall).toHaveBeenCalledWith("get_thread_root", val(3));
+    });
+
+    it("returns null when not found", async () => {
+      notFound();
+      expect(await client.getThreadRoot(999)).toBeNull();
+    });
+  });
+
   describe("getFollowing", () => {
     it("returns addresses with offset/limit", async () => {
       success(["GA", "GB"]);

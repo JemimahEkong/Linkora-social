@@ -80,6 +80,17 @@ Emitted when a new post is successfully created.
 - **Data Payload**: `PostCreatedEvent`
   - `id`: `u64`
   - `author`: `Address`
+  - `parent_id`: `Option<u64>` (present only for replies; `None` for top-level posts)
+  - `root_id`: `u64` (thread root; equals `id` for top-level posts)
+
+**Threading behavior:**
+- Top-level posts omit `parent_id` (null).
+- Replies include the parent post's `id` as `parent_id`.
+- Threading metadata is stored in dedicated keys (`ParentPost`, `ThreadRoot`, `ThreadDepth`, `ReplyIdx`, `ReplyCount`), not in the `Post` struct.
+- `AuthorPosts` indexes only top-level posts; replies are excluded.
+- Maximum nesting depth is 5 (`MAX_THREAD_DEPTH`).
+- `get_replies(post_id, offset, limit)` provides O(limit) reply pagination.
+- Deleting a parent does NOT cascade-delete child replies (orphans are permitted).
 
 ### Tip
 

@@ -61,7 +61,12 @@ describe("LinkoraClient write methods", () => {
 
   it("createPost", () => {
     expect(client.createPost("GAUTHOR", "hello")).toBe(XDR);
-    expect(mockCall).toHaveBeenCalledWith("create_post", addr("GAUTHOR"), val("hello"));
+    expect(mockCall).toHaveBeenCalledWith("create_post", addr("GAUTHOR"), val("hello"), val(null));
+  });
+
+  it("createPost with parentId", () => {
+    expect(client.createPost("GAUTHOR", "reply", 42)).toBe(XDR);
+    expect(mockCall).toHaveBeenCalledWith("create_post", addr("GAUTHOR"), val("reply"), val(42));
   });
 
   it("deletePost", () => {

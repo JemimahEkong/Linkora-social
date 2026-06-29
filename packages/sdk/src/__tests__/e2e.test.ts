@@ -72,5 +72,11 @@ describe("SDK E2E Tests against Stellar Testnet", () => {
       expect(typeof xdr).toBe("string");
       expect(xdr.length).toBeGreaterThan(0);
     });
+
+    test("createPost with parentId returns a non-empty XDR string", () => {
+      const xdr = client.createPost(user, "reply", 42);
+      expect(typeof xdr).toBe("string");
+      expect(xdr.length).toBeGreaterThan(0);
+    });
   });
 });
