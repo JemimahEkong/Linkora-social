@@ -8,16 +8,35 @@ interface NotificationsContextValue {
   unreadCount: number;
   incrementUnread: () => void;
   resetUnread: () => void;
+  addNotification: (notification: {
+    status: "pending" | "success" | "error";
+    message: string;
+    txHash?: string;
+  }) => string;
+  updateNotification: (
+    id: string,
+    notification: Partial<{
+      status: "pending" | "success" | "error";
+      message: string;
+      txHash: string;
+    }>
+  ) => void;
 }
 
 const NotificationsContext = createContext<NotificationsContextValue>({
   unreadCount: 0,
   incrementUnread: () => {},
   resetUnread: () => {},
+  addNotification: () => "",
+  updateNotification: () => {},
 });
 
 export function useNotificationsContext(): NotificationsContextValue {
   return useContext(NotificationsContext);
+}
+
+export function useNotification(): NotificationsContextValue {
+  return useNotificationsContext();
 }
 
 export function NotificationsProvider({ children }: { children: React.ReactNode }) {
@@ -41,8 +60,37 @@ export function NotificationsProvider({ children }: { children: React.ReactNode 
     localStorage.removeItem(LS_UNREAD_KEY);
   }, []);
 
+  const addNotification = useCallback(
+    (notification: {
+      status: "pending" | "success" | "error";
+      message: string;
+      txHash?: string;
+    }) => {
+      const id = `notification-${Date.now()}`;
+      if (notification.status !== "pending") incrementUnread();
+      return id;
+    },
+    [incrementUnread]
+  );
+
+  const updateNotification = useCallback(
+    (
+      _id: string,
+      notification: Partial<{
+        status: "pending" | "success" | "error";
+        message: string;
+        txHash: string;
+      }>
+    ) => {
+      if (notification.status && notification.status !== "pending") incrementUnread();
+    },
+    [incrementUnread]
+  );
+
   return (
-    <NotificationsContext.Provider value={{ unreadCount, incrementUnread, resetUnread }}>
+    <NotificationsContext.Provider
+      value={{ unreadCount, incrementUnread, resetUnread, addNotification, updateNotification }}
+    >
       {children}
     </NotificationsContext.Provider>
   );

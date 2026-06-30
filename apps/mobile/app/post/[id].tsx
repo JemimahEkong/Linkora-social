@@ -1,12 +1,15 @@
 // Post detail screen — shows full content, like count, tip total, author info.
-import React, { useMemo } from "react";
-import { Alert, Pressable, StyleSheet, Text, View } from "react-native";
-import { useLocalSearchParams, useRouter } from "expo-router";
+import React, { useMemo, useState, useEffect } from "react";
+import { Alert, Pressable, StyleSheet, Text, View, ActivityIndicator } from "react-native";
+import { Stack, useLocalSearchParams, useRouter } from "expo-router";
+import * as Clipboard from "expo-clipboard";
 
 import { useDeletePost } from "../../hooks/useDeletePost";
 import { getFeedPost } from "../../hooks/useFeed";
 import { useWallet } from "../../hooks/useWallet";
 import { useTheme } from "../../theme/useTheme";
+import { useToast } from "../../context/ToastContext";
+import { Post } from "../../components/PostCard";
 
 type PostParams = {
   id: string;
@@ -19,15 +22,40 @@ export default function PostDetailScreen() {
   const router = useRouter();
   const { address } = useWallet();
   const { deleting, deletePost } = useDeletePost();
-  const post = useMemo(() => (id ? getFeedPost(String(id)) : null), [id]);
+  const { showToast } = useToast();
+
+  const [post, setPost] = useState<Post | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    if (!id) return;
+    setLoading(true);
+    getFeedPost(String(id))
+      .then((p) => {
+        setPost(p);
+      })
+      .catch((err) => {
+        console.error("Failed to load post details:", err);
+      })
+      .finally(() => {
+        setLoading(false);
+      });
+  }, [id]);
+
   const isAuthor = Boolean(post && address === post.author);
+
+  const handleShare = async () => {
+    if (!post) return;
+    await Clipboard.setStringAsync(`linkora://post/${post.id}`);
+    showToast({ kind: "success", title: "Copied!", message: "Post link copied to clipboard." });
+  };
 
   const handleDeletePress = () => {
     if (!post) {
       return;
     }
 
-    Alert.alert("Delete post?", "This action cannot be undone.", [
+    Alert.alert("Delete post?", "This cannot be undone.", [
       { text: "Cancel", style: "cancel" },
       {
         text: "Delete",
@@ -42,6 +70,20 @@ export default function PostDetailScreen() {
     ]);
   };
 
+  if (loading) {
+    return (
+      <View
+        style={[
+          styles.container,
+          styles.content,
+          { justifyContent: "center", alignItems: "center" },
+        ]}
+      >
+        <ActivityIndicator size="large" color={theme.colors.brand.primary} />
+      </View>
+    );
+  }
+
   if (!post) {
     return (
       <View style={[styles.container, styles.content]}>
@@ -53,9 +95,16 @@ export default function PostDetailScreen() {
   }
 
   return (
-    <View style={[styles.container, styles.content]}>
-      <Text style={styles.label}>Post</Text>
-      <Text style={styles.id}>#{post.id}</Text>
+    <>
+      <Stack.Screen
+        options={{
+          gestureEnabled: true,
+          headerBackVisible: true,
+        }}
+      />
+      <View style={[styles.container, styles.content]}>
+        <Text style={styles.label}>Post</Text>
+        <Text style={styles.id}>#{post.id}</Text>
       <View style={styles.card}>
         <View style={styles.header}>
           <Text style={styles.username}>{post.username}</Text>
@@ -65,6 +114,17 @@ export default function PostDetailScreen() {
         <Text style={styles.stats}>
           Likes {post.like_count} | Tips {post.tip_total}
         </Text>
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Share post link"
+          onPress={handleShare}
+          style={({ pressed }) => [
+            styles.shareButton,
+            pressed && styles.shareButtonPressed,
+          ]}
+        >
+          <Text style={styles.shareButtonText}>Share</Text>
+        </Pressable>
       </View>
 
       {isAuthor ? (
@@ -82,7 +142,8 @@ export default function PostDetailScreen() {
           <Text style={styles.deleteButtonText}>{deleting ? "Deleting..." : "Delete post"}</Text>
         </Pressable>
       ) : null}
-    </View>
+      </View>
+    </>
   );
 }
 
@@ -163,6 +224,24 @@ function createStyles(theme: ReturnType<typeof useTheme>["theme"]) {
       color: theme.colors.text.onBrand,
       fontSize: 14,
       fontWeight: "800",
+    },
+    shareButton: {
+      minHeight: 32,
+      borderRadius: 999,
+      borderWidth: 1,
+      borderColor: theme.colors.surface.border,
+      paddingHorizontal: 12,
+      alignItems: "center",
+      justifyContent: "center",
+      alignSelf: "flex-start",
+    },
+    shareButtonPressed: {
+      opacity: 0.82,
+    },
+    shareButtonText: {
+      color: theme.colors.text.secondary,
+      fontSize: 12,
+      fontWeight: "700",
     },
   });
 }

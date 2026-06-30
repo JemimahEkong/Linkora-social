@@ -35,7 +35,7 @@ export function ProfileRow({ profile, onPress }: ProfileRowProps) {
         <Text style={styles.avatarText}>{profile.username.charAt(0).toUpperCase()}</Text>
       </View>
       <View style={styles.content}>
-        <Text style={styles.title}>{profile.username}</Text>
+        <Text style={styles.title} numberOfLines={1} ellipsizeMode="tail">{profile.username}</Text>
         <Text style={styles.subtitle}>{profile.bio}</Text>
         <Text style={styles.meta}>{shortAddress(profile.address)}</Text>
       </View>

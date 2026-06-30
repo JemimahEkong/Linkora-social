@@ -175,12 +175,13 @@ export function SearchPageClient() {
         />
       </div>
 
-      <div className="mb-6 flex flex-wrap items-center justify-between gap-4">
+      <div className="mb-6 flex flex-col sm:flex-row sm:flex-wrap items-start sm:items-center justify-between gap-4">
         <div className="flex rounded-lg border border-[var(--border)] bg-[var(--muted)] p-1">
           <button
             type="button"
             onClick={() => updateParams({ tab: "posts" })}
             className={`rounded-md px-4 py-2 text-sm font-semibold ${activeTab === "posts" ? "bg-violet-600 text-white" : "text-[var(--text-muted)] hover:text-[var(--foreground)]"}`}
+            aria-pressed={activeTab === "posts"}
           >
             Posts
           </button>
@@ -188,13 +189,14 @@ export function SearchPageClient() {
             type="button"
             onClick={() => updateParams({ tab: "profiles" })}
             className={`rounded-md px-4 py-2 text-sm font-semibold ${activeTab === "profiles" ? "bg-violet-600 text-white" : "text-[var(--text-muted)] hover:text-[var(--foreground)]"}`}
+            aria-pressed={activeTab === "profiles"}
           >
             Profiles
           </button>
         </div>
 
         {activeTab === "posts" && (
-          <div className="flex flex-wrap items-center gap-3">
+          <div className="flex flex-col sm:flex-row flex-wrap items-start sm:items-center gap-3 w-full sm:w-auto">
             <label className="text-sm text-[var(--text-muted)]">
               Sort
               <select
@@ -230,7 +232,7 @@ export function SearchPageClient() {
       </div>
 
       {error && (
-        <div className="mb-6 rounded-lg border border-red-500/50 bg-red-950/40 p-4 text-red-200">
+        <div className="mb-6 rounded-lg border border-red-500/50 bg-red-950/40 p-4 text-red-200" role="alert">
           {error}
         </div>
       )}

@@ -26,7 +26,7 @@ export const SendMessageSchema = z.object({
   sender: stellarAddressSchema,
   recipient: stellarAddressSchema,
   ciphertext_b64: base64Schema.min(1),
-  message_index: z.number().int().min(0).max(2147483647), // PostgreSQL INT max
+  message_index: z.number().int().min(0).max(2147483647), // PostgreSQL INT max; doubles as nonce
   timestamp: z.number().int().positive(),
   signature: signatureSchema,
 });

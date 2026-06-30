@@ -91,7 +91,7 @@ class FakeClient implements PgClientLike {
       return { rowCount: 1, rows: [] };
     }
 
-    if (sql.startsWith("INSERT INTO indexer_state")) {
+    if (sql.startsWith("INSERT INTO indexer_cursor")) {
       const store = this.active();
       const streamId = String(params[0]);
       const next = Number(params[1]);
@@ -100,7 +100,7 @@ class FakeClient implements PgClientLike {
       return { rowCount: 1, rows: [] };
     }
 
-    if (sql.startsWith("SELECT processed_cursor FROM indexer_state")) {
+    if (sql.startsWith("SELECT processed_cursor FROM indexer_cursor")) {
       const streamId = String(params[0]);
       const value = this.active().cursor.get(streamId);
       return {

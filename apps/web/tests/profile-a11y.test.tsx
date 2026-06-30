@@ -83,7 +83,7 @@ jest.mock("@/lib/LinkoraEventSubscriber", () => ({
 }));
 
 // Mock the SDK import used inside the page for follow actions
-jest.mock("../../../../../../packages/sdk/src/client", () => ({
+jest.mock("../../../packages/sdk/src/client", () => ({
   LinkoraClient: jest.fn().mockImplementation(() => ({
     follow: jest.fn(() => "mock-xdr"),
     unfollow: jest.fn(() => "mock-xdr"),

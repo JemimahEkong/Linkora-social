@@ -103,7 +103,14 @@ Setting `CONTRACT_ID` skips the build and `stellar contract deploy` steps.
 
 ## Contract Upgrade Procedure
 
-Upgrading the Linkora contract replaces the on-chain WASM without changing the contract ID or state.
+Upgrading the Linkora contract replaces the on-chain WASM without changing the contract ID or the existing persistent state layout.
+
+The contract keeps a small admin-controlled metadata record in instance storage:
+
+- `version` tracks the active contract state version for migration planning.
+- `implementation_wasm_hash` records the last successful WASM hash.
+
+Future releases must preserve the existing `StorageKey` variants and only append new storage fields or keys so older state can still be read safely.
 
 ### 1. Build the new WASM
 
@@ -137,6 +144,8 @@ stellar contract invoke \
   --new-wasm-hash <WASM_HASH>
 ```
 
+The contract uses `Env::deployer().update_current_contract_wasm(...)` internally, so the uploaded hash must already exist on-chain. A successful upgrade increments the stored `version` and writes the new implementation hash to instance storage.
+
 ### 4. Verify
 
 ```bash
@@ -146,7 +155,7 @@ stellar contract invoke \
   -- get_fee_bps
 ```
 
-If the call succeeds, the new WASM is active.
+If the call succeeds, the new WASM is active. For a fuller smoke test, also re-run the app flows that exercise profile creation, posts, follows, and pool operations against the upgraded contract ID.
 
 > After an upgrade the indexer receives a `ContractUpgraded` event. If you added new event types, redeploy the indexer before the new events start arriving.
 

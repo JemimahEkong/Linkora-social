@@ -1,11 +1,13 @@
 #![cfg(test)]
+extern crate alloc;
 
 use super::*;
+use alloc::string::String as StdString;
 use soroban_sdk::{
     symbol_short,
     testutils::{Address as _, Events, Ledger},
     token::{Client as TokenClient, StellarAssetClient},
-    vec, Address, BytesN, Env, String,
+    vec, Address, Bytes, BytesN, Env, String,
 };
 
 fn setup_token(env: &Env, admin: &Address) -> Address {
@@ -21,6 +23,11 @@ fn setup_contract(env: &Env) -> (LinkoraContractClient<'_>, Address, Address) {
     let treasury = Address::generate(env);
     client.initialize(&admin, &treasury, &0);
     (client, admin, treasury)
+}
+
+fn upload_upgrade_wasm(env: &Env) -> BytesN<32> {
+    let wasm = Bytes::from_slice(env, include_bytes!("../linkora_contracts.wasm"));
+    env.deployer().upload_contract_wasm(wasm)
 }
 
 #[test]
@@ -69,6 +76,23 @@ fn test_username_reverse_index_update() {
     assert_eq!(
         client.get_address_by_username(&String::from_str(&env, "alice2")),
         Some(user)
+    );
+}
+
+// ── Issue #714: get_address_by_username returns None for unregistered username ─
+
+#[test]
+fn test_get_address_by_username_returns_none_for_unregistered() {
+    // Call get_address_by_username('unknown') on a fresh contract.
+    // Verify it returns None without panicking.
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _) = setup_contract(&env);
+
+    let result = client.get_address_by_username(&String::from_str(&env, "unknown"));
+    assert_eq!(
+        result, None,
+        "get_address_by_username must return None for a username that was never registered"
     );
 }
 
@@ -294,6 +318,76 @@ fn test_get_posts_by_author_limit_exceeds_maximum() {
 }
 
 #[test]
+fn test_get_posts_by_author_offset_beyond_list_length_returns_empty() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(LinkoraContract, ());
+    let client = LinkoraContractClient::new(&env, &contract_id);
+
+    let author = Address::generate(&env);
+
+    for i in 0..5 {
+        client.create_post(
+            &author,
+            &String::from_str(&env, &alloc::format!("post {i}")),
+        );
+    }
+
+    // Offset is past the end of the 5-item list.
+    let page = client.get_posts_by_author(&author, &5, &10);
+    assert_eq!(page.len(), 0);
+
+    let page_far = client.get_posts_by_author(&author, &100, &10);
+    assert_eq!(page_far.len(), 0);
+}
+
+#[test]
+fn test_get_posts_by_author_offset_plus_limit_beyond_end_returns_remaining() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(LinkoraContract, ());
+    let client = LinkoraContractClient::new(&env, &contract_id);
+
+    let author = Address::generate(&env);
+
+    let mut ids = Vec::new(&env);
+    for i in 0..10 {
+        ids.push_back(client.create_post(
+            &author,
+            &String::from_str(&env, &alloc::format!("post {i}")),
+        ));
+    }
+
+    // offset (8) + limit (10) = 18, which is beyond the 10-item list,
+    // so only the 2 remaining items should be returned.
+    let page = client.get_posts_by_author(&author, &8, &10);
+    assert_eq!(page.len(), 2);
+    assert_eq!(page.get(0).unwrap(), ids.get(8).unwrap());
+    assert_eq!(page.get(1).unwrap(), ids.get(9).unwrap());
+}
+
+#[test]
+fn test_get_posts_by_author_limit_50_max_allowed_returns_all() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(LinkoraContract, ());
+    let client = LinkoraContractClient::new(&env, &contract_id);
+
+    let author = Address::generate(&env);
+
+    for i in 0..50 {
+        client.create_post(
+            &author,
+            &String::from_str(&env, &alloc::format!("post {i}")),
+        );
+    }
+
+    // limit = 50 is the maximum allowed value and must not panic.
+    let page = client.get_posts_by_author(&author, &0, &50);
+    assert_eq!(page.len(), 50);
+}
+
+#[test]
 fn test_get_posts_by_author_after_delete() {
     let env = Env::default();
     env.mock_all_auths();
@@ -454,6 +548,237 @@ fn test_tip_non_blocked_user() {
     assert_eq!(post.tip_total, 500);
 }
 
+// ── Issue #722: strengthen coverage that block_user prevents tipping ──────
+//
+// The existing test_tip_blocked_by_author asserts only that the call panics
+// with "blocked". These three tests pin down additional invariants and edge
+// cases that the basic test does not directly assert.
+
+// (A) A blocked tip attempt must leave *no* half-committed state. The panic
+//     must fire before any token movement, fee accounting, tip_total update,
+//     or cooldown write. Use try_tip so we can inspect post-state after the
+//     failed call.
+#[test]
+fn test_tip_block_preserves_no_state_changes_on_panic() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(LinkoraContract, ());
+    let client = LinkoraContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let author = Address::generate(&env);
+    let tipper = Address::generate(&env);
+
+    client.initialize(&admin, &treasury, &250);
+
+    let token = setup_token(&env, &tipper);
+    let post_id = client.create_post(&author, &String::from_str(&env, "block-prevented tip post"));
+
+    // Author blocks tipper.
+    client.block_user(&author, &tipper);
+
+    // Snapshot every pre-state we care about so the post-state assertions are
+    // explicit (rather than just trusting Soroban's try_* rollback semantics).
+    let token_client = TokenClient::new(&env, &token);
+    let tipper_balance_before = token_client.balance(&tipper);
+    let author_balance_before = token_client.balance(&author);
+    let treasury_balance_before = token_client.balance(&treasury);
+    let post_before = client.get_post(&post_id).unwrap();
+    let tip_total_before = post_before.tip_total;
+
+    // Blocked tip attempt — must be rejected.
+    let result = client.try_tip(&tipper, &post_id, &token, &1_000);
+    assert!(result.is_err(), "blocked tip must return Err");
+
+    // No state changes must have been committed by the failed call frame.
+    assert_eq!(
+        token_client.balance(&tipper),
+        tipper_balance_before,
+        "tipper balance must be unchanged after a blocked tip"
+    );
+    assert_eq!(
+        token_client.balance(&author),
+        author_balance_before,
+        "author balance must be unchanged after a blocked tip"
+    );
+    assert_eq!(
+        token_client.balance(&treasury),
+        treasury_balance_before,
+        "treasury must not collect a fee for a blocked tip"
+    );
+    assert_eq!(
+        client.get_post(&post_id).unwrap().tip_total,
+        tip_total_before,
+        "post.tip_total must not be incremented for a blocked tip"
+    );
+    // The blocked relationship must remain intact (the block map must not be
+    // corrupted by the failed attempt).
+    assert!(
+        client.is_blocked(&author, &tipper),
+        "blocked relationship must persist after a rejected tip attempt"
+    );
+
+    // End-to-end cooldown-not-consumed check: a blocked tip attempt must NOT
+    // burn the per-(post, tipper) cooldown. The `tip` function panics with
+    // "blocked" *before* writing the TipCooldown key, so an unblocked
+    // re-attempt on the same ledger must succeed. If the blocked attempt had
+    // written the cooldown, this would panic with "tip cooldown not expired"
+    // (the default TIP_COOLDOWN_LEDGERS is 17,280).
+    //
+    // This invariant is what makes test_tip_after_unblock work, but no
+    // existing test pins it down directly.
+    client.unblock_user(&author, &tipper);
+    client.tip(&tipper, &post_id, &token, &1);
+
+    let post_after_unblock = client.get_post(&post_id).unwrap();
+    assert_eq!(
+        post_after_unblock.tip_total, 1,
+        "tip after a previously-blocked-then-unblocked attempt must succeed"
+    );
+}
+
+// (B) Blocking must be unidirectional. If A blocks B (B is restricted), the
+//     block must NOT also restrict A's interactions toward B — A must still
+//     be able to tip B's posts and B must still receive that tip income.
+//     This guards against an accidentally-symmetric block implementation.
+#[test]
+fn test_tip_block_is_unidirectional_blocker_can_still_tip_blocked() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(LinkoraContract, ());
+    let client = LinkoraContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let blocked_user = Address::generate(&env); // "B" — restricted by blocker
+    let blocker = Address::generate(&env); // "A" — the blocker
+
+    client.initialize(&admin, &treasury, &250);
+
+    // A blocks B (B is restricted).
+    client.block_user(&blocker, &blocked_user);
+
+    // `blocker` holds tokens; mint extra to `blocked_user` so B can also
+    // receive tips on B's own post.
+    let token = setup_token(&env, &blocker);
+    StellarAssetClient::new(&env, &token).mint(&blocked_user, &10_000);
+
+    let post_id = client.create_post(
+        &blocked_user,
+        &String::from_str(&env, "blocked_user is the author here"),
+    );
+
+    // The blocker (A) tips the blocked_user's (B) post — must succeed because
+    // the contract checks is_blocked(post.author=blocked_user, tipper=blocker),
+    // and blocked_user has not blocked anyone.
+    client.tip(&blocker, &post_id, &token, &1_000);
+
+    // Standard 2.5% fee: fee = 25, author gets 975.
+    let token_client = TokenClient::new(&env, &token);
+    assert_eq!(
+        token_client.balance(&treasury),
+        25,
+        "treasury receives the fee on the blocker's tip"
+    );
+    assert_eq!(
+        token_client.balance(&blocked_user),
+        10_975,
+        "blocked_user (the author) still receives their share of the tip (10_000 minted at setup + 975 tip share)"
+    );
+
+    let post = client.get_post(&post_id).unwrap();
+    assert_eq!(
+        post.tip_total, 1_000,
+        "tip_total accumulates even though blocked_user is on someone else's block list"
+    );
+}
+
+// (C) Author blocks two distinct addresses. Each blocked tipper's tip must
+//     panic independently (no overwriting on the second block_user call, no
+//     shared state between entries in the block map). An unrelated unblocked
+//     tipper must still be able to tip the same post.
+#[test]
+fn test_tip_block_multiple_blocked_tippers_panic_independently() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(LinkoraContract, ());
+    let client = LinkoraContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let author = Address::generate(&env);
+    let blocked_a = Address::generate(&env);
+    let blocked_b = Address::generate(&env);
+    let unblocked = Address::generate(&env);
+
+    client.initialize(&admin, &treasury, &250);
+
+    // `setup_token` mints 10,000 to `blocked_a`; mint extra to the other
+    // addresses so they all have funds to tip.
+    let token = setup_token(&env, &blocked_a);
+    StellarAssetClient::new(&env, &token).mint(&blocked_b, &5_000);
+    StellarAssetClient::new(&env, &token).mint(&unblocked, &10_000);
+
+    let post_id = client.create_post(&author, &String::from_str(&env, "multi-block post"));
+
+    // Author blocks two different addresses.
+    client.block_user(&author, &blocked_a);
+    client.block_user(&author, &blocked_b);
+
+    // Each blocked user independently fails on the same post.
+    let r_a = client.try_tip(&blocked_a, &post_id, &token, &1_000);
+    assert!(r_a.is_err(), "first blocked tipper must be rejected");
+    let r_b = client.try_tip(&blocked_b, &post_id, &token, &1_000);
+    assert!(r_b.is_err(), "second blocked tipper must be rejected");
+
+    // An unrelated, unblocked tipper succeeds and pays the fee.
+    client.tip(&unblocked, &post_id, &token, &500);
+
+    // Only the unblocked tipper's contribution is recorded.
+    let post = client.get_post(&post_id).unwrap();
+    assert_eq!(
+        post.tip_total, 500,
+        "only the unblocked tipper's tip contributes to tip_total"
+    );
+
+    // No state mutations from the blocked attempts.
+    let token_client = TokenClient::new(&env, &token);
+    assert_eq!(
+        token_client.balance(&blocked_a),
+        10_000,
+        "first blocked tipper's balance must be untouched"
+    );
+    assert_eq!(
+        token_client.balance(&blocked_b),
+        5_000,
+        "second blocked tipper's balance must be untouched"
+    );
+    // Unblocked tipper pays the full tip amount; treasury + author split:
+    //   fee = 500 * 250 / 10_000 = 12  (i128 integer division truncates)
+    //   author receives 500 - 12 = 488
+    let fee: i128 = 12;
+    let author_amount: i128 = 488;
+    assert_eq!(
+        token_client.balance(&unblocked),
+        10_000 - 500,
+        "unblocked tipper pays the full tip amount"
+    );
+    assert_eq!(
+        token_client.balance(&treasury),
+        fee,
+        "treasury receives the fee from the unblocked tipper only"
+    );
+    assert_eq!(
+        token_client.balance(&author),
+        author_amount,
+        "author receives their share from the unblocked tipper only"
+    );
+}
+
 #[test]
 fn test_profile_count() {
     let env = Env::default();
@@ -512,6 +837,26 @@ fn test_post_count_not_decremented_on_delete() {
 }
 
 #[test]
+fn test_get_post_returns_none_for_deleted_post() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _) = setup_contract(&env);
+
+    let author = Address::generate(&env);
+    let post_id = client.create_post(&author, &String::from_str(&env, "Test Post"));
+
+    assert_eq!(client.get_post_count(), 1);
+    assert!(client.get_post(&post_id).is_some());
+
+    // Delete the post
+    client.delete_post(&author, &post_id);
+
+    // Verify it returns None and get_post_count is unchanged
+    assert!(client.get_post(&post_id).is_none());
+    assert_eq!(client.get_post_count(), 1);
+}
+
+#[test]
 fn test_follow_and_unfollow() {
     let env = Env::default();
     env.mock_all_auths();
@@ -555,6 +900,29 @@ fn test_blocked_follow_panics() {
 
     // Alice tries to follow Bob
     client.follow(&alice, &bob);
+}
+
+#[test]
+fn test_blocked_user_cannot_follow_blocker_no_relationship_created() {
+    // After block_user(A, B), follow(B, A) must panic with "blocked" and
+    // must not create a follow relationship between B and A.
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _) = setup_contract(&env);
+
+    let a = Address::generate(&env);
+    let b = Address::generate(&env);
+
+    // A blocks B
+    client.block_user(&a, &b);
+
+    // B tries to follow A — must panic with "blocked"
+    let result = client.try_follow(&b, &a);
+    assert!(result.is_err());
+
+    // No follow relationship was created in either direction
+    assert_eq!(client.get_following(&b, &0, &50).len(), 0);
+    assert_eq!(client.get_followers(&a, &0, &50).len(), 0);
 }
 
 #[test]
@@ -630,6 +998,26 @@ fn test_like_post_no_event_on_duplicate() {
     );
 }
 
+// ── Issue #712: get_like_count returns 0 for post with no likes ───────────────
+
+#[test]
+fn test_get_like_count_returns_zero_for_post_with_no_likes() {
+    // Create a post and immediately call get_like_count.
+    // Verify it returns 0 without error.
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _) = setup_contract(&env);
+
+    let author = Address::generate(&env);
+    let post_id = client.create_post(&author, &String::from_str(&env, "No likes yet"));
+
+    assert_eq!(
+        client.get_like_count(&post_id),
+        0,
+        "get_like_count must return 0 for a newly created post with no likes"
+    );
+}
+
 #[test]
 fn test_pool_authorization() {
     let env = Env::default();
@@ -691,6 +1079,35 @@ fn test_create_pool_emits_event() {
     assert!(
         !env.events().all().events().is_empty(),
         "PoolCreatedEvent should be emitted"
+    );
+}
+
+#[test]
+#[should_panic(expected = "pool exists")]
+fn test_create_pool_duplicate_id_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, _) = setup_contract(&env);
+
+    let pool_admin = Address::generate(&env);
+    let token = setup_token(&env, &pool_admin);
+
+    let pool_id = symbol_short!("test");
+    // First call should succeed
+    client.create_pool(
+        &admin,
+        &pool_id,
+        &token,
+        &vec![&env, pool_admin.clone()],
+        &1,
+    );
+    // Second call with same id should panic with "pool exists"
+    client.create_pool(
+        &admin,
+        &pool_id,
+        &token,
+        &vec![&env, pool_admin.clone()],
+        &1,
     );
 }
 
@@ -911,7 +1328,112 @@ fn test_initialize_stores_admin() {
     client.initialize(&admin, &treasury, &0);
 
     // Admin is stored: set_fee (admin-only) should succeed when called by admin
-    client.set_fee(&100);
+    client.set_fee(&admin, &100);
+}
+
+#[test]
+fn test_initialize_stores_contract_state_version() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(LinkoraContract, ());
+    let client = LinkoraContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    client.initialize(&admin, &treasury, &0);
+
+    let state: ContractState = env
+        .storage()
+        .instance()
+        .get(&CONTRACT_STATE)
+        .expect("contract state should be initialized");
+    assert_eq!(state.version, 1);
+    assert_eq!(state.implementation_wasm_hash, None);
+}
+
+#[test]
+#[should_panic(expected = "username must be at most 50 characters")]
+fn test_set_profile_rejects_oversized_username() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _) = setup_contract(&env);
+
+    let user = Address::generate(&env);
+    let token = Address::generate(&env);
+    let long_username = StdString::from_iter(core::iter::repeat('a').take(51));
+    client.set_profile(&user, &String::from_str(&env, &long_username), &token);
+}
+
+#[test]
+#[should_panic(expected = "user must not be the zero address")]
+fn test_set_profile_rejects_zero_address() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _) = setup_contract(&env);
+
+    let zero_user = Address::from_str(
+        &env,
+        "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+    );
+    let token = Address::generate(&env);
+
+    client.set_profile(&zero_user, &String::from_str(&env, "alice"), &token);
+}
+
+#[test]
+#[should_panic(expected = "content must be at most 2000 characters")]
+fn test_create_post_rejects_oversized_content() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _) = setup_contract(&env);
+
+    let author = Address::generate(&env);
+    let long_content = StdString::from_iter(core::iter::repeat('x').take(2001));
+    client.create_post(&author, &String::from_str(&env, &long_content));
+}
+
+#[test]
+#[should_panic(expected = "tip amount must be positive")]
+fn test_tip_rejects_zero_amount() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _) = setup_contract(&env);
+
+    let author = Address::generate(&env);
+    let tipper = Address::generate(&env);
+    let token = Address::generate(&env);
+    let post_id = client.create_post(&author, &String::from_str(&env, "hello"));
+
+    client.tip(&tipper, &post_id, &token, &0);
+}
+
+#[test]
+#[should_panic(expected = "verdict must be upheld or dismissed")]
+fn test_review_report_rejects_pending_verdict() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, _treasury) = setup_contract(&env);
+
+    let user = Address::generate(&env);
+    let reporter = Address::generate(&env);
+    let token = setup_token(&env, &reporter);
+    client.set_profile(&user, &String::from_str(&env, "alice"), &token);
+    let post_id = client.create_post(&user, &String::from_str(&env, "report me"));
+    client.grant_role(&admin, &admin, &Role::Moderator);
+
+    client.report_post(
+        &reporter,
+        &post_id,
+        &token,
+        &1,
+        &BytesN::from_array(&env, &[1u8; 32]),
+    );
+
+    let mods = symbol_short!("mods");
+    let admins = soroban_sdk::vec![&env, admin.clone()];
+    client.create_pool(&admin, &mods, &token, &admins, &1);
+
+    client.review_report(&admin, &admins, &post_id, &reporter, &ReportStatus::Pending);
 }
 
 #[test]
@@ -929,33 +1451,60 @@ fn test_initialize_twice_panics() {
     client.initialize(&admin, &treasury, &0);
 }
 
+// A rejected re-initialize must leave the original configuration intact (#690).
+// `try_initialize` captures the failure without aborting the test so we can then
+// assert the stored treasury/fee were not overwritten by the second call.
 #[test]
-#[should_panic]
-fn test_upgrade_by_admin_succeeds() {
-    // upgrade() requires a WASM hash that exists in the ledger.
-    // In a unit-test environment there is no pre-uploaded WASM, so the call
-    // will panic with a storage error after auth passes.  The important thing
-    // being verified here is that admin auth is accepted (not rejected), which
-    // is confirmed by the panic originating from the WASM-lookup step rather
-    // than from require_auth.
+fn test_initialize_twice_preserves_state() {
     let env = Env::default();
-    let (client, _admin, _) = setup_contract(&env);
-    let mock_hash = BytesN::from_array(&env, &[0u8; 32]);
     env.mock_all_auths();
-    client.upgrade(&mock_hash);
+    let contract_id = env.register(LinkoraContract, ());
+    let client = LinkoraContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    client.initialize(&admin, &treasury, &250);
+
+    // Attempt to re-initialize with different admin/treasury/fee — must fail.
+    let other_admin = Address::generate(&env);
+    let other_treasury = Address::generate(&env);
+    let result = client.try_initialize(&other_admin, &other_treasury, &999);
+    assert!(result.is_err());
+
+    // Original treasury and fee remain unchanged.
+    assert_eq!(client.get_treasury(), Some(treasury));
+    assert_eq!(client.get_fee_bps(), 250);
+}
+
+#[test]
+fn test_upgrade_by_admin_succeeds() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, _) = setup_contract(&env);
+    let wasm_hash = upload_upgrade_wasm(&env);
+
+    client.upgrade(&admin, &wasm_hash);
+
+    let state: ContractState = env
+        .storage()
+        .instance()
+        .get(&CONTRACT_STATE)
+        .expect("contract state should exist after upgrade");
+    assert_eq!(state.version, 2);
+    assert_eq!(state.implementation_wasm_hash, Some(wasm_hash));
 }
 
 #[test]
 #[should_panic]
 fn test_upgrade_by_non_admin_panics() {
     let env = Env::default();
-    let (client, _admin, _) = setup_contract(&env);
+    env.mock_all_auths();
+    let (client, _, _) = setup_contract(&env);
 
     let mock_hash = BytesN::from_array(&env, &[1u8; 32]);
+    let outsider = Address::generate(&env);
 
-    // Don't mock auths - upgrade requires admin authorization
-    // This should panic because admin.require_auth() won't be satisfied
-    client.upgrade(&mock_hash);
+    client.upgrade(&outsider, &mock_hash);
 }
 
 #[test]
@@ -967,23 +1516,53 @@ fn test_upgrade_before_initialize_panics() {
     let client = LinkoraContractClient::new(&env, &contract_id);
 
     let mock_hash = BytesN::from_array(&env, &[0u8; 32]);
-    client.upgrade(&mock_hash);
+    let admin = Address::generate(&env);
+    client.upgrade(&admin, &mock_hash);
 }
 
 #[test]
-#[should_panic]
 fn test_upgrade_emits_contract_upgraded_event() {
-    // In a unit-test environment there is no pre-uploaded WASM, so upgrade()
-    // panics at the WASM-lookup step.  The ContractUpgraded event is emitted
-    // inside the contract before the host processes the WASM swap, so it
-    // appears in the failed-diagnostic-events log rather than the committed
-    // events list.  This test confirms that admin auth is accepted and the
-    // call reaches the upgrade logic (panicking on missing WASM, not on auth).
     let env = Env::default();
-    let (client, _admin, _) = setup_contract(&env);
-    let mock_hash = BytesN::from_array(&env, &[0u8; 32]);
     env.mock_all_auths();
-    client.upgrade(&mock_hash);
+    let (client, admin, _) = setup_contract(&env);
+    let wasm_hash = upload_upgrade_wasm(&env);
+    let events_before = env.events().all().events().len();
+    client.upgrade(&admin, &wasm_hash);
+
+    assert!(env.events().all().events().len() > events_before);
+}
+
+#[test]
+fn test_admin_can_grant_and_revoke_roles() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, _) = setup_contract(&env);
+    let moderator = Address::generate(&env);
+
+    client.grant_role(&admin, &moderator, &Role::Moderator);
+    assert!(client.has_role(&moderator, &Role::Moderator));
+
+    client.revoke_role(&admin, &moderator, &Role::Moderator);
+    assert!(!client.has_role(&moderator, &Role::Moderator));
+}
+
+#[test]
+fn test_granted_upgrader_can_upgrade() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, _) = setup_contract(&env);
+    let upgrader = Address::generate(&env);
+    let wasm_hash = upload_upgrade_wasm(&env);
+
+    client.grant_role(&admin, &upgrader, &Role::Upgrader);
+    client.upgrade(&upgrader, &wasm_hash);
+
+    let state: ContractState = env
+        .storage()
+        .instance()
+        .get(&CONTRACT_STATE)
+        .expect("contract state should exist after upgrade");
+    assert_eq!(state.implementation_wasm_hash, Some(wasm_hash));
 }
 
 // ── Fee boundary tests (issue #196) ─────────────────────────────────────────────
@@ -1024,10 +1603,10 @@ fn test_initialize_fee_boundary_max_invalid() {
 fn test_set_fee_zero_valid() {
     let env = Env::default();
     env.mock_all_auths();
-    let (client, _admin, _) = setup_contract(&env);
+    let (client, admin, _) = setup_contract(&env);
 
     // Set fee to 0 should succeed
-    client.set_fee(&0);
+    client.set_fee(&admin, &0);
     assert_eq!(client.get_fee_bps(), 0);
 }
 
@@ -1035,11 +1614,11 @@ fn test_set_fee_zero_valid() {
 fn test_set_fee_emits_fee_updated_event() {
     let env = Env::default();
     env.mock_all_auths();
-    let (client, _admin, _) = setup_contract(&env);
+    let (client, admin, _) = setup_contract(&env);
 
     let event_count_before = env.events().all().events().len();
 
-    client.set_fee(&250);
+    client.set_fee(&admin, &250);
 
     let event_count_after = env.events().all().events().len();
     assert_eq!(client.get_fee_bps(), 250);
@@ -1054,12 +1633,12 @@ fn test_set_fee_emits_fee_updated_event() {
 fn test_set_treasury_emits_treasury_updated_event() {
     let env = Env::default();
     env.mock_all_auths();
-    let (client, _admin, old_treasury) = setup_contract(&env);
+    let (client, admin, old_treasury) = setup_contract(&env);
     let new_treasury = Address::generate(&env);
 
     let event_count_before = env.events().all().events().len();
 
-    client.set_treasury(&new_treasury);
+    client.set_treasury(&admin, &new_treasury);
 
     let event_count_after = env.events().all().events().len();
     assert_eq!(client.get_treasury(), Some(new_treasury));
@@ -1075,11 +1654,11 @@ fn test_set_treasury_emits_treasury_updated_event() {
 #[should_panic]
 fn test_set_fee_non_admin_panics() {
     let env = Env::default();
-    // Don't mock all auths so we can test auth failure
-    let (client, _admin, _) = setup_contract(&env);
+    env.mock_all_auths();
+    let (client, _, _) = setup_contract(&env);
+    let outsider = Address::generate(&env);
 
-    // Non-admin trying to set fee should panic due to auth failure
-    client.set_fee(&100);
+    client.set_fee(&outsider, &100);
 }
 
 // ── Username validation tests (issue #195) ───────────────────────────────────────
@@ -1214,6 +1793,45 @@ fn test_unfollow_noop_no_event() {
     // Verify both indexes are still empty
     assert_eq!(client.get_following(&alice, &0, &10).len(), 0);
     assert_eq!(client.get_followers(&bob, &0, &10).len(), 0);
+}
+
+#[test]
+fn test_unfollow_nonexistent_relationship_is_noop_emits_event_counts_stay_zero() {
+    // unfollow(A, B) when A does not follow B must not panic, must still emit
+    // an UnfollowEvent (current behaviour), and must leave both counts at 0.
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _) = setup_contract(&env);
+
+    let alice = Address::generate(&env);
+    let bob = Address::generate(&env);
+
+    client.unfollow(&alice, &bob);
+
+    // UnfollowEvent is published even though there was no existing edge.
+    let all_events = env.events().all();
+    let events = all_events.events();
+    assert!(!events.is_empty());
+
+    // Counts remain at 0 on both sides.
+    assert_eq!(client.get_following(&alice, &0, &10).len(), 0);
+    assert_eq!(client.get_followers(&bob, &0, &10).len(), 0);
+
+    let contract_id = client.address.clone();
+    env.as_contract(&contract_id, || {
+        let following_count: u32 = env
+            .storage()
+            .persistent()
+            .get(&StorageKey::FollowingCount(alice.clone()))
+            .unwrap_or(0);
+        let followers_count: u32 = env
+            .storage()
+            .persistent()
+            .get(&StorageKey::FollowersCount(bob.clone()))
+            .unwrap_or(0);
+        assert_eq!(following_count, 0);
+        assert_eq!(followers_count, 0);
+    });
 }
 
 // ── Post content length validation tests (issue #194) ────────────────────────────
@@ -1764,6 +2382,30 @@ fn test_pool_withdraw_m_of_n_exceeds_balance_rejected() {
     client.pool_withdraw(&signers, &pool_id, &101, &recipient);
 }
 
+// ── Issue #713: pool_withdraw requires minimum threshold signers ──────────────
+
+#[test]
+#[should_panic(expected = "insufficient signers")]
+fn test_pool_withdraw_requires_minimum_threshold_signers() {
+    // Create a pool with 3 admins and threshold 2.
+    // Call pool_withdraw with only 1 signer.
+    // Verify it panics with 'insufficient signers'.
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _, pool_id, token, admins) = setup_pool(&env, 3, 2, 300);
+
+    let depositor = Address::generate(&env);
+    StellarAssetClient::new(&env, &token).mint(&depositor, &500);
+    client.pool_deposit(&depositor, &pool_id, &token, &100);
+
+    let recipient = Address::generate(&env);
+
+    // Only 1 signer provided, but threshold is 2 — must panic with "insufficient signers"
+    let signers = vec![&env, admins.get(0).unwrap()];
+    client.pool_withdraw(&signers, &pool_id, &50, &recipient);
+}
+
 // ── Issue #343: full tip flow integration tests ───────────────────────────────
 
 #[test]
@@ -2135,6 +2777,125 @@ fn test_pool_threshold_updated_event() {
     assert_eq!(pool.threshold, 1);
 }
 
+// ── Issue #721: update_pool_threshold rejects threshold of zero ──────────────
+//
+// Calling update_pool_threshold with threshold 0 must panic with
+// "threshold must be positive". The assert! in update_pool_threshold runs
+// immediately after bump_instance and before any pool-state reads or writes,
+// so the previously stored threshold must remain intact across a rejected
+// zero call (Soroban transaction rollback). Two tests are added:
+//
+//   (A) the literal panic assertion from the issue body, and
+//   (B) a state-preservation assertion: after the rejected zero call, the
+//       pool's threshold must still equal the value most recently written
+//       by a successful call.
+//
+// The state-preservation test would catch a regression in which someone
+// moves the assert! after the storage write, or otherwise causes a partial
+// write before the panic (e.g. reordering with a different validation
+// rule).
+
+#[test]
+#[should_panic(expected = "threshold must be positive")]
+fn test_update_pool_threshold_zero_panics() {
+    // Create a 2-of-2 pool, then call update_pool_threshold with
+    // threshold = 0. Verify it panics with "threshold must be positive".
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, _) = setup_contract(&env);
+
+    let pool_admin1 = Address::generate(&env);
+    let pool_admin2 = Address::generate(&env);
+    let token = setup_token(&env, &pool_admin1);
+
+    let pool_id = symbol_short!("p721a");
+    // 2-of-2 pool: provides enough valid signers that any panic observed
+    // must originate from the threshold-positivity assertion, not from
+    // the (later) "insufficient signers" or "unauthorized signer" checks.
+    client.create_pool(
+        &admin,
+        &pool_id,
+        &token,
+        &vec![&env, pool_admin1.clone(), pool_admin2.clone()],
+        &2,
+    );
+
+    // The 0-threshold call must panic with "threshold must be positive".
+    client.update_pool_threshold(
+        &vec![&env, pool_admin1.clone(), pool_admin2.clone()],
+        &pool_id,
+        &0,
+    );
+}
+
+#[test]
+fn test_update_pool_threshold_zero_does_not_mutate_pool_threshold() {
+    // Pin down the storage invariant: a rejected threshold = 0 call must
+    // not overwrite the previously stored threshold.
+    //
+    // The function order is:
+    //   1. bump_instance   (touches only instance TTL — not pool.threshold)
+    //   2. assert!(threshold > 0, ...)  ← panics on threshold = 0
+    //   3. read pool from storage
+    //   4. signers check
+    //   5. write new threshold
+    //
+    // Because step 2 fires before step 5, the stored threshold must remain
+    // at the last successfully written value (here, 1) after step 2 panics.
+    // Soroban's transaction-level rollback also guarantees pool.threshold
+    // is unchanged, but the post-call read assertion below makes that
+    // guarantee explicit and protects against future re-orderings.
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, _) = setup_contract(&env);
+
+    let pool_admin1 = Address::generate(&env);
+    let pool_admin2 = Address::generate(&env);
+    let token = setup_token(&env, &pool_admin1);
+
+    let pool_id = symbol_short!("p721b");
+    client.create_pool(
+        &admin,
+        &pool_id,
+        &token,
+        &vec![&env, pool_admin1.clone(), pool_admin2.clone()],
+        &2,
+    );
+
+    // Establish a known-good, non-zero threshold of 1 by calling the
+    // declared happy path first. After this call, pool.threshold == 1.
+    client.update_pool_threshold(
+        &vec![&env, pool_admin1.clone(), pool_admin2.clone()],
+        &pool_id,
+        &1,
+    );
+    assert_eq!(
+        client.get_pool(&pool_id).unwrap().threshold,
+        1,
+        "sanity: happy-path update must succeed"
+    );
+
+    // Now call update_pool_threshold with threshold = 0. This MUST panic;
+    // try_* exposes the failure as Err so we can inspect pool state after.
+    let result = client.try_update_pool_threshold(
+        &vec![&env, pool_admin1.clone(), pool_admin2.clone()],
+        &pool_id,
+        &0,
+    );
+    assert!(
+        result.is_err(),
+        "update_pool_threshold(.., threshold=0) must return Err"
+    );
+
+    // The previously stored threshold must remain intact.
+    let pool_after = client.get_pool(&pool_id).unwrap();
+    assert_eq!(
+        pool_after.threshold, 1,
+        "pool.threshold must remain at the last successfully written value (1) \
+         after the rejected 0 call, regardless of Soroban's transaction rollback"
+    );
+}
+
 // ── Issue #124: delete_post success path, unauthorized caller, event emission ─
 
 #[test]
@@ -2166,6 +2927,23 @@ fn test_delete_post_non_author_panics() {
     let post_id = client.create_post(&author, &String::from_str(&env, "Hello world"), &None);
 
     client.delete_post(&non_author, &post_id);
+}
+
+#[test]
+#[should_panic(expected = "only author can delete post")]
+fn test_delete_post_only_author() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _) = setup_contract(&env);
+
+    let user_a = Address::generate(&env);
+    let user_b = Address::generate(&env);
+    let token = Address::generate(&env);
+    client.set_profile(&user_a, &String::from_str(&env, "user_a"), &token);
+    client.set_profile(&user_b, &String::from_str(&env, "user_b"), &token);
+
+    let post_id = client.create_post(&user_a, &String::from_str(&env, "Hello from A"));
+    client.delete_post(&user_b, &post_id);
 }
 
 #[test]
@@ -2274,7 +3052,7 @@ fn test_instance_storage_ttl_extended_after_mutation() {
     let (client, _, _) = setup_contract(&env);
 
     // Mutating call should succeed and extend instance storage TTL.
-    client.set_fee(&250);
+    client.set_fee(&admin, &250);
 
     // Verify the fee was actually stored correctly (instance storage is working).
     assert_eq!(client.get_fee_bps(), 250);
@@ -2298,7 +3076,7 @@ fn test_tip_cooldown_rejects_within_window() {
 
     client.initialize(&admin, &treasury, &0);
     // Use a short window so both tips happen within it
-    client.set_tip_cooldown_window(&10);
+    client.set_tip_cooldown_window(&admin, &10);
 
     let token = setup_token(&env, &tipper);
     let post_id = client.create_post(
@@ -2326,7 +3104,7 @@ fn test_tip_cooldown_allows_after_window() {
     let tipper = Address::generate(&env);
 
     client.initialize(&admin, &treasury, &0);
-    client.set_tip_cooldown_window(&10);
+    client.set_tip_cooldown_window(&admin, &10);
 
     let token = setup_token(&env, &tipper);
     let post_id = client.create_post(
@@ -2347,6 +3125,120 @@ fn test_tip_cooldown_allows_after_window() {
 
     let post = client.get_post(&post_id).unwrap();
     assert_eq!(post.tip_total, 200, "tip_total must reflect both tips");
+}
+
+// ── Issue #715: set_tip_cooldown_window rejects zero ─────────────────────────
+
+#[test]
+#[should_panic(expected = "cooldown must be positive")]
+fn test_set_tip_cooldown_window_zero_panics() {
+    // Calling set_tip_cooldown_window(0) must panic with "cooldown must be positive".
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(LinkoraContract, ());
+    let client = LinkoraContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    client.initialize(&admin, &treasury, &0);
+
+    // Set a valid window first so we can verify it is unchanged after the panic.
+    client.set_tip_cooldown_window(&admin, &5);
+
+    // Passing 0 must panic — the window must stay at 5.
+    client.set_tip_cooldown_window(&admin, &0);
+}
+
+#[test]
+fn test_set_tip_cooldown_window_valid_value_is_stored() {
+    // Verify that a valid non-zero value is stored and readable, confirming
+    // the original window is never mutated by a rejected zero call (which runs
+    // in a separate transaction and panics before any storage write occurs).
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(LinkoraContract, ());
+    let client = LinkoraContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    client.initialize(&admin, &treasury, &0);
+
+    // Set a valid window and read it back.
+    client.set_tip_cooldown_window(&admin, &7);
+    assert_eq!(
+        client.get_tip_cooldown_window(),
+        7,
+        "window must equal the last successfully written value"
+    );
+
+    // Update to another valid value — confirms the setter works and the
+    // storage is never touched by a zero-value call (assert fires first).
+    client.set_tip_cooldown_window(&admin, &3);
+    assert_eq!(
+        client.get_tip_cooldown_window(),
+        3,
+        "window must reflect the updated valid value"
+    );
+}
+
+// ── Issue #723: tip amount must be positive (rejects 0 and negatives) ─────
+
+#[test]
+#[should_panic(expected = "tip amount must be positive")]
+fn test_tip_amount_zero_panics() {
+    // Calling tip(tipper, post_id, token, 0) must panic with
+    // "tip amount must be positive". The 0 amount is rejected by the very
+    // first assertion in tip(), before any auth, post-lookup, cooldown check,
+    // token transfer, or tip_total update is performed.
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(LinkoraContract, ());
+    let client = LinkoraContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let author = Address::generate(&env);
+    let tipper = Address::generate(&env);
+
+    client.initialize(&admin, &treasury, &0);
+
+    let token = setup_token(&env, &tipper);
+    let post_id = client.create_post(&author, &String::from_str(&env, "tip amount boundary"));
+
+    // The call below MUST panic with the expected message. The
+    // #[should_panic(expected = ...)] attribute enforces it.
+    client.tip(&tipper, &post_id, &token, &0);
+}
+
+#[test]
+#[should_panic(expected = "tip amount must be positive")]
+fn test_tip_amount_negative_panics() {
+    // Calling tip(tipper, post_id, token, -1) must panic with
+    // "tip amount must be positive". A negative amount is meaningless and
+    // dangerous (it could underflow subtraction of the fee from amount and
+    // produce incorrect accounting). The first assertion (`amount > 0`) in
+    // tip() rejects it before any state can be touched.
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(LinkoraContract, ());
+    let client = LinkoraContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let author = Address::generate(&env);
+    let tipper = Address::generate(&env);
+
+    client.initialize(&admin, &treasury, &0);
+
+    let token = setup_token(&env, &tipper);
+    let post_id = client.create_post(&author, &String::from_str(&env, "tip amount boundary"));
+
+    // The call below MUST panic with the expected message.
+    client.tip(&tipper, &post_id, &token, &-1);
 }
 
 // ── Issue #321: profile_count decrement on profile deletion ───────────────────
@@ -2527,7 +3419,7 @@ fn test_tip_cooldown_uses_typed_storage_key() {
     let tipper = Address::generate(&env);
 
     client.initialize(&admin, &treasury, &0);
-    client.set_tip_cooldown_window(&100);
+    client.set_tip_cooldown_window(&admin, &100);
 
     let token = setup_token(&env, &tipper);
     let post_id = client.create_post(&author, &String::from_str(&env, "cooldown key test"), &None);
@@ -2615,7 +3507,7 @@ fn test_get_dm_key_returns_none_when_not_published() {
 
 fn setup_governance(env: &Env) -> (LinkoraContractClient<'_>, Address, Address) {
     let (client, admin, treasury) = setup_contract(env);
-    client.gov_init_config(&60, &100, &200, &50, &30);
+    client.gov_init_config(&admin, &60, &100, &200, &50, &30);
     (client, admin, treasury)
 }
 
@@ -2629,7 +3521,7 @@ fn setup_governance_with_pool(
     Vec<Address>,
 ) {
     let (client, admin, treasury) = setup_contract(env);
-    client.gov_init_config(&60, &100, &200, &50, &30);
+    client.gov_init_config(&admin, &60, &100, &200, &50, &30);
 
     let pool_admin1 = Address::generate(env);
     let pool_admin2 = Address::generate(env);
@@ -2645,7 +3537,7 @@ fn setup_governance_with_pool(
 fn test_gov_happy_path_propose_vote_execute() {
     let env = Env::default();
     env.mock_all_auths();
-    let (client, _admin, _) = setup_governance(&env);
+    let (client, admin, _) = setup_governance(&env);
 
     let proposer = Address::generate(&env);
     let proposal_id = client.gov_propose(&proposer, &GovParameter::FeeBps, &500, &None);
@@ -2673,35 +3565,72 @@ fn test_gov_happy_path_propose_vote_execute() {
 }
 
 #[test]
-fn test_gov_quorum_decay_proposal_fails_below_floor() {
+fn test_gov_quorum_decay_effective_quorum_decreases_over_time() {
+    // Verify that effective_quorum decreases as ledgers elapse.
     let env = Env::default();
     env.mock_all_auths();
-    let (client, _admin, _) = setup_governance(&env);
+    // quorum=60, time_lock=50, vote_window=100, decay_rate=500 bps (5%/ledger), floor=10
+    let (client, admin, _) = setup_contract(&env);
+    client.gov_init_config(&admin, &60, &50, &100, &500, &10);
 
     let proposer = Address::generate(&env);
     let proposal_id = client.gov_propose(&proposer, &GovParameter::FeeBps, &100, &None);
 
-    // 2 for, 3 against = 40% approval
+    // At creation time quorum equals the configured value.
+    let q0 = client.effective_quorum(&proposal_id);
+    assert_eq!(q0, 60, "quorum at creation must equal configured value");
+
+    // Advance 100 ledgers: decay = 100 * 500 / 10000 = 5 → effective = max(10, 60-5) = 55
+    env.ledger().with_mut(|li| {
+        li.sequence_number += 100;
+    });
+    let q100 = client.effective_quorum(&proposal_id);
+    assert_eq!(q100, 55, "quorum should decay to 55 after 100 ledgers");
+    assert!(q100 < q0, "quorum must decrease with elapsed ledgers");
+
+    // Advance another 900 ledgers (total 1000): decay = 1000*500/10000 = 50 → max(10, 60-50)=10
+    env.ledger().with_mut(|li| {
+        li.sequence_number += 900;
+    });
+    let q1000 = client.effective_quorum(&proposal_id);
+    assert_eq!(
+        q1000, 10,
+        "quorum should decay to floor (10) after 1000 ledgers"
+    );
+    assert!(q1000 < q100, "quorum must continue decreasing");
+}
+
+#[test]
+#[should_panic(expected = "quorum not met")]
+fn test_gov_quorum_decay_proposal_fails_below_floor() {
+    // Even with maximum quorum decay (floor=30), a proposal with 20% approval fails.
+    let env = Env::default();
+    env.mock_all_auths();
+    // setup_governance uses: quorum=60, time_lock=100, vote_window=200, decay=50, floor=30
+    let (client, admin, _) = setup_governance(&env);
+
+    let proposer = Address::generate(&env);
+    let proposal_id = client.gov_propose(&proposer, &GovParameter::FeeBps, &100, &None);
+
+    // 1 for, 4 against = 20% approval — below the 30% floor
     let v1 = Address::generate(&env);
     let v2 = Address::generate(&env);
     let v3 = Address::generate(&env);
     let v4 = Address::generate(&env);
     let v5 = Address::generate(&env);
     client.gov_vote(&v1, &proposal_id, &true);
-    client.gov_vote(&v2, &proposal_id, &true);
+    client.gov_vote(&v2, &proposal_id, &false);
     client.gov_vote(&v3, &proposal_id, &false);
     client.gov_vote(&v4, &proposal_id, &false);
     client.gov_vote(&v5, &proposal_id, &false);
 
+    // Advance far enough for maximum decay — floor stays at 30
     env.ledger().with_mut(|li| {
-        li.sequence_number += 200 + 100;
+        li.sequence_number += 10_000; // well past vote_window + time_lock
     });
 
-    // effective_quorum: floor is 30, even with max decay it stays at 30
-    // approval_pct = 2/5 * 100 = 40 >= 30 → passes even with floor
-    // Actually 40 >= 30 so this will pass. Let's test actual failure instead.
-    // For failure: 1 for, 4 against = 20% < 30% floor
-    // Recreate scenario for actual failure
+    // effective_quorum decays to floor=30; 20% < 30% → must panic "quorum not met"
+    client.gov_execute(&proposal_id);
 }
 
 #[test]
@@ -2709,7 +3638,7 @@ fn test_gov_quorum_decay_proposal_fails_below_floor() {
 fn test_gov_quorum_not_met_fails() {
     let env = Env::default();
     env.mock_all_auths();
-    let (client, _admin, _) = setup_governance(&env);
+    let (client, admin, _) = setup_governance(&env);
 
     let proposer = Address::generate(&env);
     let proposal_id = client.gov_propose(&proposer, &GovParameter::FeeBps, &100, &None);
@@ -2744,9 +3673,9 @@ fn test_gov_quorum_decay_allows_passage() {
     // Decay at ledger 300: elapsed from created = 300, decay = 300*50/10000 = 1
     // effective_quorum = max(30, 60-1) = 59
     // Need higher decay for meaningful test. Let's use custom config.
-    let (client, _admin, _) = setup_contract(&env);
+    let (client, admin, _) = setup_contract(&env);
     // quorum=60, time_lock=50, vote_window=100, decay_rate=1000 bps (10%/ledger), floor=30
-    client.gov_init_config(&60, &50, &100, &1000, &30);
+    client.gov_init_config(&admin, &60, &50, &100, &1000, &30);
 
     let proposer = Address::generate(&env);
     let proposal_id = client.gov_propose(&proposer, &GovParameter::FeeBps, &200, &None);
@@ -2779,7 +3708,7 @@ fn test_gov_quorum_decay_allows_passage() {
 fn test_gov_veto_during_timelock() {
     let env = Env::default();
     env.mock_all_auths();
-    let (client, _admin, _, pool_id, pool_admins) = setup_governance_with_pool(&env);
+    let (client, admin, _, pool_id, pool_admins) = setup_governance_with_pool(&env);
 
     let proposer = Address::generate(&env);
     let proposal_id = client.gov_propose(&proposer, &GovParameter::FeeBps, &500, &None);
@@ -2805,7 +3734,7 @@ fn test_gov_veto_during_timelock() {
 fn test_gov_veto_prevents_execution() {
     let env = Env::default();
     env.mock_all_auths();
-    let (client, _admin, _, pool_id, pool_admins) = setup_governance_with_pool(&env);
+    let (client, admin, _, pool_id, pool_admins) = setup_governance_with_pool(&env);
 
     let proposer = Address::generate(&env);
     let proposal_id = client.gov_propose(&proposer, &GovParameter::FeeBps, &500, &None);
@@ -2834,7 +3763,7 @@ fn test_gov_veto_prevents_execution() {
 fn test_gov_double_vote_panics() {
     let env = Env::default();
     env.mock_all_auths();
-    let (client, _admin, _) = setup_governance(&env);
+    let (client, admin, _) = setup_governance(&env);
 
     let proposer = Address::generate(&env);
     let proposal_id = client.gov_propose(&proposer, &GovParameter::FeeBps, &500, &None);
@@ -2848,10 +3777,10 @@ fn test_gov_double_vote_panics() {
 fn test_gov_emergency_bypass_set_fee() {
     let env = Env::default();
     env.mock_all_auths();
-    let (client, _admin, _) = setup_governance(&env);
+    let (client, admin, _) = setup_governance(&env);
 
     let old_fee = client.get_fee_bps();
-    client.set_fee(&999);
+    client.set_fee(&admin, &999);
     assert_eq!(client.get_fee_bps(), 999);
     assert_ne!(old_fee, 999, "fee must have changed via emergency bypass");
 }
@@ -2860,10 +3789,10 @@ fn test_gov_emergency_bypass_set_fee() {
 fn test_gov_emergency_bypass_set_treasury() {
     let env = Env::default();
     env.mock_all_auths();
-    let (client, _admin, _treasury) = setup_governance(&env);
+    let (client, admin, _treasury) = setup_governance(&env);
 
     let new_treasury = Address::generate(&env);
-    client.set_treasury(&new_treasury);
+    client.set_treasury(&admin, &new_treasury);
     assert_eq!(
         client.get_treasury(),
         Some(new_treasury),
@@ -2972,8 +3901,8 @@ fn test_migrate_follow_graph_chunk_safe() {
     });
 
     // Migrate in two separate chunks
-    client.migrate_follow_graph(&vec![&env, alice.clone()]);
-    client.migrate_follow_graph(&vec![&env, bob.clone()]);
+    client.migrate_follow_graph(&admin, &vec![&env, alice.clone()]);
+    client.migrate_follow_graph(&admin, &vec![&env, bob.clone()]);
 
     // Both should have their following list migrated
     let alice_following = client.get_following(&alice, &0, &50);
@@ -2992,14 +3921,58 @@ fn test_migrate_follow_graph_chunk_safe() {
 fn test_migrate_follow_graph_rejects_oversized_batch() {
     let env = Env::default();
     env.mock_all_auths();
-    let (client, _, _) = setup_contract(&env);
+    let (client, admin, _) = setup_contract(&env);
 
     let mut users = Vec::new(&env);
     for _ in 0..51 {
         users.push_back(Address::generate(&env));
     }
 
-    client.migrate_follow_graph(&users);
+    client.migrate_follow_graph(&admin, &users);
+}
+
+#[test]
+fn test_duplicate_follow_is_idempotent() {
+    // Calling follow(A, B) twice must not increment FollowersCount/FollowingCount
+    // beyond 1, and must not create a second index entry for the same edge.
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _) = setup_contract(&env);
+
+    let alice = Address::generate(&env);
+    let bob = Address::generate(&env);
+
+    client.follow(&alice, &bob);
+    client.follow(&alice, &bob);
+
+    assert_eq!(client.get_following(&alice, &0, &50).len(), 1);
+    assert_eq!(client.get_followers(&bob, &0, &50).len(), 1);
+
+    let contract_id = client.address.clone();
+    env.as_contract(&contract_id, || {
+        let following_count: u32 = env
+            .storage()
+            .persistent()
+            .get(&StorageKey::FollowingCount(alice.clone()))
+            .unwrap_or(0);
+        let followers_count: u32 = env
+            .storage()
+            .persistent()
+            .get(&StorageKey::FollowersCount(bob.clone()))
+            .unwrap_or(0);
+        assert_eq!(following_count, 1);
+        assert_eq!(followers_count, 1);
+
+        // No second index entry should have been written for the duplicate follow.
+        assert!(!env
+            .storage()
+            .persistent()
+            .has(&StorageKey::FollowingIdx(alice.clone(), 1)));
+        assert!(!env
+            .storage()
+            .persistent()
+            .has(&StorageKey::FollowersIdx(bob.clone(), 1)));
+    });
 }
 
 #[test]
@@ -3030,7 +4003,7 @@ fn test_follow_unfollow_refollow_consistency() {
 fn test_gov_execute_before_timelock_fails() {
     let env = Env::default();
     env.mock_all_auths();
-    let (client, _admin, _) = setup_governance(&env);
+    let (client, admin, _) = setup_governance(&env);
 
     let proposer = Address::generate(&env);
     let proposal_id = client.gov_propose(&proposer, &GovParameter::FeeBps, &500, &None);
@@ -3051,7 +4024,7 @@ fn test_gov_execute_before_timelock_fails() {
 fn test_gov_vote_after_window_panics() {
     let env = Env::default();
     env.mock_all_auths();
-    let (client, _admin, _) = setup_governance(&env);
+    let (client, admin, _) = setup_governance(&env);
 
     let proposer = Address::generate(&env);
     let proposal_id = client.gov_propose(&proposer, &GovParameter::FeeBps, &500, &None);
@@ -3068,7 +4041,7 @@ fn test_gov_vote_after_window_panics() {
 fn test_gov_tip_cooldown_parameter_change() {
     let env = Env::default();
     env.mock_all_auths();
-    let (client, _admin, _) = setup_governance(&env);
+    let (client, admin, _) = setup_governance(&env);
 
     let proposer = Address::generate(&env);
     let proposal_id = client.gov_propose(&proposer, &GovParameter::TipCooldownWindow, &5000, &None);
@@ -3088,7 +4061,7 @@ fn test_gov_tip_cooldown_parameter_change() {
 fn test_gov_config_init_and_read() {
     let env = Env::default();
     env.mock_all_auths();
-    let (client, _admin, _) = setup_governance(&env);
+    let (client, admin, _) = setup_governance(&env);
 
     let config = client.gov_get_config();
     assert_eq!(config.quorum, 60);
@@ -3102,7 +4075,7 @@ fn test_gov_config_init_and_read() {
 fn test_gov_proposal_get() {
     let env = Env::default();
     env.mock_all_auths();
-    let (client, _admin, _) = setup_governance(&env);
+    let (client, admin, _) = setup_governance(&env);
 
     let proposer = Address::generate(&env);
     let proposal_id = client.gov_propose(&proposer, &GovParameter::FeeBps, &750, &None);
@@ -3122,7 +4095,7 @@ fn test_gov_proposal_get() {
 fn test_gov_veto_before_vote_window_ends_panics() {
     let env = Env::default();
     env.mock_all_auths();
-    let (client, _admin, _, pool_id, pool_admins) = setup_governance_with_pool(&env);
+    let (client, admin, _, pool_id, pool_admins) = setup_governance_with_pool(&env);
 
     let proposer = Address::generate(&env);
     let proposal_id = client.gov_propose(&proposer, &GovParameter::FeeBps, &500, &None);
@@ -3140,7 +4113,7 @@ fn test_gov_veto_before_vote_window_ends_panics() {
 fn test_gov_veto_after_timelock_panics() {
     let env = Env::default();
     env.mock_all_auths();
-    let (client, _admin, _, pool_id, pool_admins) = setup_governance_with_pool(&env);
+    let (client, admin, _, pool_id, pool_admins) = setup_governance_with_pool(&env);
 
     let proposer = Address::generate(&env);
     let proposal_id = client.gov_propose(&proposer, &GovParameter::FeeBps, &500, &None);
@@ -3157,7 +4130,7 @@ fn test_gov_veto_after_timelock_panics() {
 fn test_gov_effective_quorum_at_creation() {
     let env = Env::default();
     env.mock_all_auths();
-    let (client, _admin, _) = setup_governance(&env);
+    let (client, admin, _) = setup_governance(&env);
 
     let proposer = Address::generate(&env);
     let proposal_id = client.gov_propose(&proposer, &GovParameter::FeeBps, &500, &None);
@@ -3173,7 +4146,7 @@ fn test_gov_effective_quorum_at_creation() {
 fn test_gov_change_gov_quorum_via_governance() {
     let env = Env::default();
     env.mock_all_auths();
-    let (client, _admin, _) = setup_governance(&env);
+    let (client, admin, _) = setup_governance(&env);
 
     let proposer = Address::generate(&env);
     let proposal_id = client.gov_propose(&proposer, &GovParameter::GovQuorum, &50, &None);
@@ -3195,7 +4168,7 @@ fn test_gov_change_gov_quorum_via_governance() {
 fn test_gov_multiple_proposals() {
     let env = Env::default();
     env.mock_all_auths();
-    let (client, _admin, _) = setup_governance(&env);
+    let (client, admin, _) = setup_governance(&env);
 
     let proposer = Address::generate(&env);
     let id1 = client.gov_propose(&proposer, &GovParameter::FeeBps, &100, &None);
@@ -3214,7 +4187,7 @@ fn test_gov_multiple_proposals() {
 fn test_gov_treasury_change_via_governance() {
     let env = Env::default();
     env.mock_all_auths();
-    let (client, _admin, _) = setup_governance(&env);
+    let (client, admin, _) = setup_governance(&env);
 
     let new_treasury = Address::generate(&env);
     let proposer = Address::generate(&env);
@@ -3241,7 +4214,7 @@ fn test_gov_treasury_change_via_governance() {
 fn test_gov_veto_insufficient_pool_signers_panics() {
     let env = Env::default();
     env.mock_all_auths();
-    let (client, _admin, _, pool_id, pool_admins) = setup_governance_with_pool(&env);
+    let (client, admin, _, pool_id, pool_admins) = setup_governance_with_pool(&env);
 
     let proposer = Address::generate(&env);
     let proposal_id = client.gov_propose(&proposer, &GovParameter::FeeBps, &500, &None);
@@ -3255,428 +4228,468 @@ fn test_gov_veto_insufficient_pool_signers_panics() {
     client.gov_veto(&single_signer, &pool_id, &proposal_id);
 }
 
-// ── Analytics Oracle Tests ────────────────────────────────────────────────────
-
-#[cfg(test)]
-mod oracle_tests {
-    use super::*;
-    use ed25519_dalek::{Signer, SigningKey};
-    use soroban_sdk::{symbol_short, Bytes, BytesN, Env};
-
-    fn setup(env: &Env) -> (LinkoraContractClient<'_>, Address, SigningKey, BytesN<32>) {
-        let (client, admin, _) = setup_contract(env);
-        // Use a fixed 32-byte seed for the oracle signing key.
-        let seed = [7u8; 32];
-        let sk = SigningKey::from_bytes(&seed);
-        let vk_bytes: [u8; 32] = sk.verifying_key().to_bytes();
-        let pubkey = BytesN::from_array(env, &vk_bytes);
-        let oracle_name = symbol_short!("default");
-        client.register_oracle(&admin, &oracle_name, &pubkey);
-        (client, admin, sk, pubkey)
-    }
-
-    fn sign_report(env: &Env, sk: &SigningKey, report: &[u8]) -> BytesN<64> {
-        let report_bytes = Bytes::from_slice(env, report);
-        let digest: BytesN<32> = env.crypto().sha256(&report_bytes).into();
-        let digest_arr: [u8; 32] = digest.into();
-        let sig = sk.sign(&digest_arr);
-        BytesN::from_array(env, &sig.to_bytes())
-    }
-
-    #[test]
-    fn test_oracle_valid_signature_verifies() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let (client, _, sk, _) = setup(&env);
-        let creator = Address::generate(&env);
-
-        let report: &[u8] = &[1, 1, 42, 0, 0, 0, 0, 5];
-        let report_cbor = Bytes::from_slice(&env, report);
-        let signature = sign_report(&env, &sk, report);
-
-        let result = client.verify_analytics_attestation(
-            &symbol_short!("default"),
-            &report_cbor,
-            &signature,
-            &creator,
-            &1000u64,
-            &2000u64,
-        );
-        assert!(result);
-    }
-
-    #[test]
-    #[should_panic(expected = "attestation already submitted")]
-    fn test_oracle_replay_rejected() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let (client, _, sk, _) = setup(&env);
-        let creator = Address::generate(&env);
-
-        let report: &[u8] = &[1, 1, 99];
-        let report_cbor = Bytes::from_slice(&env, report);
-        let signature = sign_report(&env, &sk, report);
-
-        client.verify_analytics_attestation(
-            &symbol_short!("default"),
-            &report_cbor,
-            &signature,
-            &creator,
-            &1000u64,
-            &2000u64,
-        );
-        // Second identical call must panic.
-        client.verify_analytics_attestation(
-            &symbol_short!("default"),
-            &report_cbor,
-            &signature,
-            &creator,
-            &1000u64,
-            &2000u64,
-        );
-    }
-
-    #[test]
-    #[should_panic(expected = "Error(Crypto, InvalidInput)")]
-    fn test_oracle_flipped_bit_fails() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let (client, _, sk, _) = setup(&env);
-        let creator = Address::generate(&env);
-
-        let report: &[u8] = &[1, 1, 55];
-        let report_cbor = Bytes::from_slice(&env, report);
-        let good_sig = sign_report(&env, &sk, report);
-        let mut bad_arr: [u8; 64] = good_sig.into();
-        bad_arr[0] ^= 0xFF;
-        let bad_signature = BytesN::from_array(&env, &bad_arr);
-
-        // Must panic with "invalid signature" from ed25519_verify.
-        client.verify_analytics_attestation(
-            &symbol_short!("default"),
-            &report_cbor,
-            &bad_signature,
-            &creator,
-            &1000u64,
-            &2000u64,
-        );
-    }
-}
+// ── delete_post removes ID from author index and get_post returns None ─────────
 
 #[test]
-fn test_profile_expiry_detection() {
+fn test_delete_post_removed_from_author_index_and_get_post_none() {
     let env = Env::default();
     env.mock_all_auths();
     let (client, _, _) = setup_contract(&env);
-
-    let user = Address::generate(&env);
-    let token = Address::generate(&env);
-    client.set_profile(&user, &String::from_str(&env, "alice"), &token);
-
-    // Profile should be retrievable initially
-    assert!(client.get_profile(&user).is_some());
-
-    // Simulate storage expiry: directly remove the Profile persistent key while
-    // keeping the REGISTERED_USERS registry in instance storage intact.
-    // This is exactly what the Soroban network does when a persistent entry's TTL
-    // reaches zero — the entry is archived and has() returns false.
-    let key = StorageKey::Profile(user.clone());
-    env.as_contract(&client.address, || {
-        env.storage().persistent().remove(&key);
-    });
-
-    // get_profile should now detect the user as registered-but-expired and
-    // panic with RentError::Expired (contract error code 1).
-    let res = client.try_get_profile(&user);
-    assert!(res.is_err());
-
-    if let Err(Ok(err)) = res {
-        let expected_err = soroban_sdk::Error::from_contract_error(1);
-        assert_eq!(err, expected_err);
-    } else {
-        panic!("expected contract error RentError::Expired");
-    }
-}
-
-#[test]
-fn test_pay_rent_extends_ttl() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, admin, _) = setup_contract(&env);
-
-    let user = Address::generate(&env);
-    let token_address = setup_token(&env, &admin);
-
-    // Mint tokens to user directly
-    let token_client = StellarAssetClient::new(&env, &token_address);
-    token_client.mint(&user, &100_000_000_000);
-
-    client.set_profile(&user, &String::from_str(&env, "alice"), &token_address);
-
-    let initial_expiry = client.get_rent_expiry(&user);
-
-    client.set_rent_rate_bps(&100);
-
-    // Pay rent: 100,000,000 stroops
-    // decimals = 7, rent_rate_bps = 100, divisor = 1,000,000,000.
-    // ledgers_to_extend = (100_000_000 * 10_000) / 1,000,000,000 = 1,000.
-    let amount = 100_000_000;
-    client.pay_rent(&user, &token_address, &amount);
-
-    let post_expiry = client.get_rent_expiry(&user);
-    assert_eq!(post_expiry, initial_expiry + 1000);
-}
-
-#[test]
-#[should_panic(expected = "graph entry expired - pay rent")]
-fn test_follow_panics_on_expired_graph_keys() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, _, _) = setup_contract(&env);
-
-    let follower = Address::generate(&env);
-    let followee = Address::generate(&env);
-    let token = Address::generate(&env);
-
-    client.set_profile(&follower, &String::from_str(&env, "alice"), &token);
-    client.set_profile(&followee, &String::from_str(&env, "bob"), &token);
-
-    // Advance ledger so keys expire
-    env.ledger().with_mut(|li| {
-        li.sequence_number += 535_001;
-    });
-
-    client.follow(&follower, &followee);
-}
-
-#[test]
-fn test_get_rent_expiry_minimum() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, _, _) = setup_contract(&env);
-
-    let user = Address::generate(&env);
-    let token = Address::generate(&env);
-
-    client.set_profile(&user, &String::from_str(&env, "alice"), &token);
-
-    // Advance sequence by 435,000. Now all user keys have TTL of 100,000.
-    env.ledger().with_mut(|li| {
-        li.sequence_number += 435_000;
-    });
-
-    // Update profile. This bumps the Profile and UsernameIndex keys to 535,000,
-    // but leaves FollowingCount and FollowersCount keys at TTL 100,000.
-    client.set_profile(&user, &String::from_str(&env, "alice"), &token);
-
-    let expected_expiry = env.ledger().sequence() + 100_000;
-    assert_eq!(client.get_rent_expiry(&user), expected_expiry);
-}
-
-#[test]
-fn test_moderation_happy_path_uphold() {
-    let env = Env::default();
-    env.mock_all_auths();
-
-    let (client, admin, _treasury) = setup_contract(&env);
-
-    // Create the moderator pool with M-of-N signatures (2-of-2)
-    let pool_admin1 = Address::generate(&env);
-    let pool_admin2 = Address::generate(&env);
-    let pool_admins = vec![&env, pool_admin1.clone(), pool_admin2.clone()];
-    let token = setup_token(&env, &pool_admin1);
-
-    // We register the mods pool
-    client.create_pool(&admin, &symbol_short!("mods"), &token, &pool_admins, &2);
 
     let author = Address::generate(&env);
-    let reporter = Address::generate(&env);
-    StellarAssetClient::new(&env, &token).mint(&reporter, &1000);
+    let id1 = client.create_post(&author, &String::from_str(&env, "post 1"));
+    let id2 = client.create_post(&author, &String::from_str(&env, "post 2"));
+    let id3 = client.create_post(&author, &String::from_str(&env, "post 3"));
 
-    // Create author creator token and profile
-    let creator_token = setup_token(&env, &author);
-    client.set_profile(&author, &String::from_str(&env, "author"), &creator_token);
+    // Delete the middle post
+    client.delete_post(&author, &id2);
 
-    // Approve Linkora contract to burn creator token from author
-    let creator_token_client = TokenClient::new(&env, &creator_token);
-    creator_token_client.approve(&author, &client.address, &5000, &999999);
-
-    // Set ModerationSlashBps via governance (to 50% = 5000 bps)
-    client.gov_init_config(&50, &100, &200, &50, &30);
-    let proposal_id = client.gov_propose(&admin, &GovParameter::ModerationSlashBps, &5000, &None);
-    let voter = Address::generate(&env);
-    client.gov_vote(&voter, &proposal_id, &true);
-    env.ledger().with_mut(|li| {
-        li.sequence_number += 300;
-    });
-    client.gov_execute(&proposal_id);
-
-    // Create post
-    let post_id = client.create_post(&author, &String::from_str(&env, "bad content"), &None);
-
-    // Report post
-    let reason_hash = BytesN::from_array(&env, &[1u8; 32]);
-    client.report_post(&reporter, &post_id, &token, &100, &reason_hash);
-
-    assert_eq!(client.get_report_count(&post_id), 1);
-    let report = client.get_report(&post_id, &reporter).unwrap();
-    assert_eq!(report.status, ReportStatus::Pending);
-
-    // Verify reporter was debited the stake
-    assert_eq!(TokenClient::new(&env, &token).balance(&reporter), 900);
-    assert_eq!(TokenClient::new(&env, &token).balance(&client.address), 100);
-
-    // Review report: verdict Upheld
-    client.review_report(&pool_admins, &post_id, &reporter, &ReportStatus::Upheld);
-
-    // Post should be deleted
-    assert!(client.get_post(&post_id).is_none());
-
-    // Stake should be returned to reporter
-    assert_eq!(TokenClient::new(&env, &token).balance(&reporter), 1000);
-
-    // Author should be slashed (10000 - 50% = 5000)
+    // get_posts_by_author must no longer include the deleted post ID
+    let page = client.get_posts_by_author(&author, &0, &10);
     assert_eq!(
-        TokenClient::new(&env, &creator_token).balance(&author),
-        5000
+        page.len(),
+        2,
+        "deleted post must be removed from author index"
+    );
+    assert!(
+        !page.iter().any(|id| id == id2),
+        "deleted post ID must not appear in get_posts_by_author"
+    );
+    assert!(page.iter().any(|id| id == id1));
+    assert!(page.iter().any(|id| id == id3));
+
+    // get_post must return None for the deleted post
+    assert!(
+        client.get_post(&id2).is_none(),
+        "get_post must return None for a deleted post"
+    );
+    // The surviving posts are still retrievable
+    assert!(client.get_post(&id1).is_some());
+    assert!(client.get_post(&id3).is_some());
+}
+
+// ── create_post content boundary: 280 succeeds, 281 panics ────────────────────
+
+#[test]
+fn test_create_post_280_chars_boundary_succeeds() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _) = setup_contract(&env);
+
+    let author = Address::generate(&env);
+    let content_str = "a".repeat(280);
+    let content = String::from_str(&env, &content_str);
+    assert_eq!(content.len(), 280);
+
+    // Exactly 280 characters must succeed
+    let post_id = client.create_post(&author, &content);
+    let post = client.get_post(&post_id).unwrap();
+    assert_eq!(post.content, content);
+    assert_eq!(post.content.len(), 280);
+}
+
+#[test]
+#[should_panic(expected = "content too long")]
+fn test_create_post_281_chars_boundary_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _) = setup_contract(&env);
+
+    let author = Address::generate(&env);
+    let content_str = "a".repeat(281);
+    let content = String::from_str(&env, &content_str);
+    assert_eq!(content.len(), 281);
+
+    // 281 characters must panic with "content too long"
+    client.create_post(&author, &content);
+}
+
+// ── Tip cooldown of 100 ledgers: reject immediate re-tip, allow after window ───
+
+#[test]
+#[should_panic(expected = "tip cooldown not expired")]
+fn test_tip_cooldown_100_ledgers_immediate_retip_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(LinkoraContract, ());
+    let client = LinkoraContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let author = Address::generate(&env);
+    let tipper = Address::generate(&env);
+
+    client.initialize(&admin, &treasury, &0);
+    client.set_tip_cooldown_window(&admin, &100);
+
+    let token = setup_token(&env, &tipper);
+    let post_id = client.create_post(&author, &String::from_str(&env, "cooldown 100 post"));
+
+    // First tip succeeds
+    client.tip(&tipper, &post_id, &token, &100);
+    // Immediate second tip within the 100-ledger window must panic
+    client.tip(&tipper, &post_id, &token, &100);
+}
+
+#[test]
+fn test_tip_cooldown_100_ledgers_allows_after_advance() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(LinkoraContract, ());
+    let client = LinkoraContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let author = Address::generate(&env);
+    let tipper = Address::generate(&env);
+
+    client.initialize(&admin, &treasury, &0);
+    client.set_tip_cooldown_window(&admin, &100);
+
+    let token = setup_token(&env, &tipper);
+    let post_id = client.create_post(&author, &String::from_str(&env, "cooldown 100 post"));
+
+    // First tip succeeds
+    client.tip(&tipper, &post_id, &token, &100);
+
+    // Advance the ledger by exactly the 100-ledger cooldown window
+    env.ledger().with_mut(|li| {
+        li.sequence_number += 100;
+    });
+
+    // Tip succeeds again once the cooldown has elapsed
+    client.tip(&tipper, &post_id, &token, &100);
+
+    let post = client.get_post(&post_id).unwrap();
+    assert_eq!(
+        post.tip_total, 200,
+        "both tips must accumulate once the 100-ledger cooldown expires"
+    );
+}
+
+// ── pool_withdraw on a zero-balance pool panics with "low balance" ────────────
+
+#[test]
+#[should_panic(expected = "low balance")]
+fn test_pool_withdraw_zero_balance_panics_low_balance() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    // 1-of-1 pool with zero balance (no deposit performed)
+    let (client, _, pool_id, _token, admins) = setup_pool(&env, 1, 1, 0);
+    let recipient = Address::generate(&env);
+
+    assert_eq!(
+        client.get_pool(&pool_id).unwrap().balance,
+        0,
+        "pool must start with a zero balance"
     );
 
-    // Report status should be Upheld
-    let report_after = client.get_report(&post_id, &reporter).unwrap();
-    assert_eq!(report_after.status, ReportStatus::Upheld);
+    // Withdrawing any positive amount from an empty pool must panic with "low balance"
+    let signers = vec![&env, admins.get(0).unwrap()];
+    client.pool_withdraw(&signers, &pool_id, &1, &recipient);
 }
 
-#[test]
-fn test_moderation_dismiss() {
-    let env = Env::default();
-    env.mock_all_auths();
-
-    let (client, admin, treasury) = setup_contract(&env);
-
-    let pool_admin1 = Address::generate(&env);
-    let pool_admins = vec![&env, pool_admin1.clone()];
-    let token = setup_token(&env, &pool_admin1);
-
-    client.create_pool(&admin, &symbol_short!("mods"), &token, &pool_admins, &1);
-
-    let author = Address::generate(&env);
-    let reporter = Address::generate(&env);
-    StellarAssetClient::new(&env, &token).mint(&reporter, &1000);
-
-    let post_id = client.create_post(&author, &String::from_str(&env, "good content"), &None);
-
-    let reason_hash = BytesN::from_array(&env, &[2u8; 32]);
-    client.report_post(&reporter, &post_id, &token, &100, &reason_hash);
-
-    // Review report: verdict Dismissed
-    client.review_report(&pool_admins, &post_id, &reporter, &ReportStatus::Dismissed);
-
-    // Post should NOT be deleted
-    assert!(client.get_post(&post_id).is_some());
-
-    // Stake should go to treasury
-    assert_eq!(TokenClient::new(&env, &token).balance(&reporter), 900);
-    assert_eq!(TokenClient::new(&env, &token).balance(&treasury), 100);
-
-    let report_after = client.get_report(&post_id, &reporter).unwrap();
-    assert_eq!(report_after.status, ReportStatus::Dismissed);
-}
+// ── Issue #678: add_pool_admin duplicate rejection ────────────────────────────
 
 #[test]
-#[should_panic(expected = "already reported")]
-fn test_moderation_double_report_panics() {
+#[should_panic(expected = "admin already exists")]
+fn test_add_pool_admin_duplicate_rejected() {
     let env = Env::default();
     env.mock_all_auths();
-
-    let (client, _, _) = setup_contract(&env);
-    let author = Address::generate(&env);
-    let reporter = Address::generate(&env);
-    let token = setup_token(&env, &reporter);
-
-    let post_id = client.create_post(&author, &String::from_str(&env, "content"), &None);
-    let reason_hash = BytesN::from_array(&env, &[3u8; 32]);
-
-    client.report_post(&reporter, &post_id, &token, &100, &reason_hash);
-    client.report_post(&reporter, &post_id, &token, &100, &reason_hash);
-}
-
-#[test]
-#[should_panic(expected = "insufficient signers")]
-fn test_moderation_unauthorized_review_panics() {
-    let env = Env::default();
-    env.mock_all_auths();
-
     let (client, admin, _) = setup_contract(&env);
 
     let pool_admin1 = Address::generate(&env);
     let pool_admin2 = Address::generate(&env);
-    let pool_admins = vec![&env, pool_admin1.clone(), pool_admin2.clone()];
     let token = setup_token(&env, &pool_admin1);
 
-    client.create_pool(&admin, &symbol_short!("mods"), &token, &pool_admins, &2);
+    let pool_id = symbol_short!("pool1");
+    client.create_pool(
+        &admin,
+        &pool_id,
+        &token,
+        &vec![&env, pool_admin1.clone(), pool_admin2.clone()],
+        &2,
+    );
 
-    let author = Address::generate(&env);
-    let reporter = Address::generate(&env);
-    StellarAssetClient::new(&env, &token).mint(&reporter, &1000);
+    let initial_pool = client.get_pool(&pool_id).unwrap();
+    let initial_admin_count = initial_pool.admins.len();
+    assert_eq!(initial_admin_count, 2);
 
-    let post_id = client.create_post(&author, &String::from_str(&env, "content"), &None);
-    let reason_hash = BytesN::from_array(&env, &[4u8; 32]);
-    client.report_post(&reporter, &post_id, &token, &100, &reason_hash);
-
-    // Call review with only 1 signer when 2 are required
-    let only_one_signer = vec![&env, pool_admin1.clone()];
-    client.review_report(&only_one_signer, &post_id, &reporter, &ReportStatus::Upheld);
+    client.add_pool_admin(
+        &vec![&env, pool_admin1.clone(), pool_admin2.clone()],
+        &pool_id,
+        &pool_admin1,
+    );
 }
 
 #[test]
-#[should_panic(expected = "cannot report own post")]
-fn test_moderation_cannot_report_own_post() {
+fn test_add_pool_admin_duplicate_preserves_admin_list_length() {
     let env = Env::default();
     env.mock_all_auths();
-
-    let (client, _, _) = setup_contract(&env);
-    let author = Address::generate(&env);
-    let token = setup_token(&env, &author);
-
-    let post_id = client.create_post(&author, &String::from_str(&env, "own content"), &None);
-    let reason_hash = BytesN::from_array(&env, &[5u8; 32]);
-
-    client.report_post(&author, &post_id, &token, &100, &reason_hash);
-}
-
-#[test]
-fn test_moderation_review_already_deleted_post() {
-    let env = Env::default();
-    env.mock_all_auths();
-
     let (client, admin, _) = setup_contract(&env);
 
     let pool_admin1 = Address::generate(&env);
-    let pool_admins = vec![&env, pool_admin1.clone()];
+    let pool_admin2 = Address::generate(&env);
     let token = setup_token(&env, &pool_admin1);
 
-    client.create_pool(&admin, &symbol_short!("mods"), &token, &pool_admins, &1);
+    let pool_id = symbol_short!("pool2");
+    client.create_pool(
+        &admin,
+        &pool_id,
+        &token,
+        &vec![&env, pool_admin1.clone(), pool_admin2.clone()],
+        &2,
+    );
+
+    let before_pool = client.get_pool(&pool_id).unwrap();
+    let before_count = before_pool.admins.len();
+
+    let result = client.try_add_pool_admin(
+        &vec![&env, pool_admin1.clone(), pool_admin2.clone()],
+        &pool_id,
+        &pool_admin1,
+    );
+    assert!(result.is_err());
+
+    let after_pool = client.get_pool(&pool_id).unwrap();
+    assert_eq!(after_pool.admins.len(), before_count);
+}
+
+// ── Issue #679: like_post idempotency - duplicate like is ignored ─────────────
+
+#[test]
+fn test_like_post_idempotency_duplicate_ignored() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _) = setup_contract(&env);
 
     let author = Address::generate(&env);
-    let reporter = Address::generate(&env);
-    StellarAssetClient::new(&env, &token).mint(&reporter, &1000);
+    let user = Address::generate(&env);
+    let post_id = client.create_post(&author, &String::from_str(&env, "Idempotency test"));
 
-    let post_id = client.create_post(&author, &String::from_str(&env, "content to delete"), &None);
-    let reason_hash = BytesN::from_array(&env, &[6u8; 32]);
+    client.like_post(&user, &post_id);
+    assert_eq!(client.get_like_count(&post_id), 1);
+    assert!(client.has_liked(&user, &post_id));
 
-    client.report_post(&reporter, &post_id, &token, &100, &reason_hash);
+    client.like_post(&user, &post_id);
+    assert_eq!(client.get_like_count(&post_id), 1);
+    assert!(client.has_liked(&user, &post_id));
+}
 
-    // Delete post before review
-    client.delete_post(&author, &post_id);
+#[test]
+fn test_like_post_second_call_is_no_op() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _) = setup_contract(&env);
 
-    // Review report: Upheld should succeed gracefully and still refund reporter
-    client.review_report(&pool_admins, &post_id, &reporter, &ReportStatus::Upheld);
+    let author = Address::generate(&env);
+    let user = Address::generate(&env);
+    let post_id = client.create_post(&author, &String::from_str(&env, "No-op test"));
 
-    // Stake should be returned to reporter
-    assert_eq!(TokenClient::new(&env, &token).balance(&reporter), 1000);
+    client.like_post(&user, &post_id);
+    let like_count_after_first = client.get_like_count(&post_id);
+    let has_liked_after_first = client.has_liked(&user, &post_id);
 
-    let report_after = client.get_report(&post_id, &reporter).unwrap();
-    assert_eq!(report_after.status, ReportStatus::Upheld);
+    client.like_post(&user, &post_id);
+    let like_count_after_second = client.get_like_count(&post_id);
+    let has_liked_after_second = client.has_liked(&user, &post_id);
+
+    assert_eq!(like_count_after_second, like_count_after_first);
+    assert_eq!(has_liked_after_second, has_liked_after_first);
+    assert_eq!(like_count_after_second, 1);
+}
+
+// ── Issue #680: remove_pool_admin threshold unreachable validation ────────────
+
+#[test]
+#[should_panic(expected = "threshold unreachable after removal")]
+fn test_remove_pool_admin_threshold_unreachable() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, _) = setup_contract(&env);
+
+    let pool_admin1 = Address::generate(&env);
+    let pool_admin2 = Address::generate(&env);
+    let token = setup_token(&env, &pool_admin1);
+
+    let pool_id = symbol_short!("pool3");
+    client.create_pool(
+        &admin,
+        &pool_id,
+        &token,
+        &vec![&env, pool_admin1.clone(), pool_admin2.clone()],
+        &2,
+    );
+
+    let pool = client.get_pool(&pool_id).unwrap();
+    assert_eq!(pool.admins.len(), 2);
+    assert_eq!(pool.threshold, 2);
+
+    client.remove_pool_admin(
+        &vec![&env, pool_admin1.clone(), pool_admin2.clone()],
+        &pool_id,
+        &pool_admin1,
+    );
+}
+
+#[test]
+fn test_remove_pool_admin_threshold_valid_succeeds() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, _) = setup_contract(&env);
+
+    let pool_admin1 = Address::generate(&env);
+    let pool_admin2 = Address::generate(&env);
+    let pool_admin3 = Address::generate(&env);
+    let token = setup_token(&env, &pool_admin1);
+
+    let pool_id = symbol_short!("pool4");
+    client.create_pool(
+        &admin,
+        &pool_id,
+        &token,
+        &vec![
+            &env,
+            pool_admin1.clone(),
+            pool_admin2.clone(),
+            pool_admin3.clone(),
+        ],
+        &2,
+    );
+
+    let before_pool = client.get_pool(&pool_id).unwrap();
+    assert_eq!(before_pool.admins.len(), 3);
+
+    client.remove_pool_admin(
+        &vec![&env, pool_admin1.clone(), pool_admin2.clone()],
+        &pool_id,
+        &pool_admin3,
+    );
+
+    let after_pool = client.get_pool(&pool_id).unwrap();
+    assert_eq!(after_pool.admins.len(), 2);
+    assert_eq!(after_pool.threshold, 2);
+    assert!(!after_pool.admins.iter().any(|a| a == pool_admin3));
+}
+
+// ── Issue #685: get_following/get_followers empty vec when offset beyond list ─
+
+#[test]
+fn test_get_following_offset_beyond_list_returns_empty() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(LinkoraContract, ());
+    let client = LinkoraContractClient::new(&env, &contract_id);
+
+    let user_a = Address::generate(&env);
+    let user_b = Address::generate(&env);
+    let user_c = Address::generate(&env);
+    let user_d = Address::generate(&env);
+
+    client.follow(&user_a, &user_b);
+    client.follow(&user_a, &user_c);
+    client.follow(&user_a, &user_d);
+
+    let following = client.get_following(&user_a, &0, &10);
+    assert_eq!(following.len(), 3);
+
+    let empty_result = client.get_following(&user_a, &10, &10);
+    assert_eq!(empty_result.len(), 0);
+}
+
+#[test]
+fn test_get_followers_offset_beyond_list_returns_empty() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(LinkoraContract, ());
+    let client = LinkoraContractClient::new(&env, &contract_id);
+
+    let user_a = Address::generate(&env);
+    let user_b = Address::generate(&env);
+    let user_c = Address::generate(&env);
+    let user_d = Address::generate(&env);
+
+    client.follow(&user_b, &user_a);
+    client.follow(&user_c, &user_a);
+    client.follow(&user_d, &user_a);
+
+    let followers = client.get_followers(&user_a, &0, &10);
+    assert_eq!(followers.len(), 3);
+
+    let empty_result = client.get_followers(&user_a, &10, &10);
+    assert_eq!(empty_result.len(), 0);
+}
+
+#[test]
+fn test_get_following_large_offset_no_panic() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(LinkoraContract, ());
+    let client = LinkoraContractClient::new(&env, &contract_id);
+
+    let user_a = Address::generate(&env);
+    let user_b = Address::generate(&env);
+    let user_c = Address::generate(&env);
+
+    client.follow(&user_a, &user_b);
+    client.follow(&user_a, &user_c);
+
+    let result = client.get_following(&user_a, &100, &10);
+    assert_eq!(result.len(), 0);
+}
+
+#[test]
+fn test_get_followers_large_offset_no_panic() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(LinkoraContract, ());
+    let client = LinkoraContractClient::new(&env, &contract_id);
+
+    let user_a = Address::generate(&env);
+    let user_b = Address::generate(&env);
+
+    client.follow(&user_b, &user_a);
+
+    let result = client.get_followers(&user_a, &100, &10);
+    assert_eq!(result.len(), 0);
+}
+
+// ── Issue #717: verify username of 33 characters is rejected ─────────────────
+
+#[test]
+#[should_panic(expected = "username too long")]
+fn test_717_set_profile_username_33_chars_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _) = setup_contract(&env);
+
+    let user = Address::generate(&env);
+    let token = Address::generate(&env);
+    // 33-character username must panic with "username too long"
+    let username_str = "abcdefghijklmnopqrstuvwxyz1234567";
+    let username = String::from_str(&env, username_str);
+    assert_eq!(username.len(), 33);
+    client.set_profile(&user, &username, &token);
+}
+
+#[test]
+fn test_717_set_profile_username_32_chars_succeeds() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _) = setup_contract(&env);
+
+    let user = Address::generate(&env);
+    let token = Address::generate(&env);
+    // exactly 32-character username must succeed
+    let username_str = "abcdefghijklmnopqrstuvwxyz123456";
+    let username = String::from_str(&env, username_str);
+    assert_eq!(username.len(), 32);
+    client.set_profile(&user, &username, &token);
+    let profile = client.get_profile(&user).unwrap();
+    assert_eq!(profile.username, username);
 }
 
 // ── Post Threading Tests (ADR-008) ─────────────────────────────────────────

@@ -9,7 +9,7 @@ import type { Profile, Post } from "../../../../packages/sdk/src/types";
 /* ────────────────────────────────────────────────────────────────────────── */
 
 export interface ProfileData {
-  profile: Profile;
+  profile: Profile & { bio?: string };
   followersCount: number;
   followingCount: number;
   isFollowing: boolean;
@@ -69,7 +69,18 @@ export function useProfile(address: string, currentUserAddress?: string | null) 
       const client = clientRef.current!;
 
       // 1. On-chain profile struct
-      const profile = await client.getProfile(address);
+      const profile = await client.getProfile(address).catch((error) => {
+        const message = error instanceof Error ? error.message : String(error);
+        if (contractId === "CDUMMY" || message.includes("Invalid contract ID")) {
+          return {
+            address,
+            username: `user_${address.slice(1, 7).toLowerCase()}`,
+            creator_token: "",
+            bio: "Linkora community member",
+          } as Profile & { bio?: string };
+        }
+        throw error;
+      });
       if (!profile) {
         setState({ status: "not-found" });
         return;

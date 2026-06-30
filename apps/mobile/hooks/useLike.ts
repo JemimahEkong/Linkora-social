@@ -1,7 +1,10 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, useMemo } from "react";
+import { LinkoraClient } from "linkora-sdk";
 
 import { useToast } from "../context/ToastContext";
 import { useWallet } from "./useWallet";
+import { useNetwork } from "./useNetwork";
+import { useSubmitTx } from "./useSubmitTx";
 
 export interface UseLikeOptions {
   postId: number | string;
@@ -17,11 +20,6 @@ export interface UseLikeResult {
   like: () => Promise<boolean>;
 }
 
-async function likePostTransaction(_liker: string, _postId: number | string): Promise<void> {
-  // Replace with the SDK-backed `like_post(liker, postId)` submission once signing is wired.
-  await new Promise<void>((resolve) => setTimeout(resolve, 500));
-}
-
 export function useLike({
   postId,
   initialHasLiked = false,
@@ -29,6 +27,11 @@ export function useLike({
 }: UseLikeOptions): UseLikeResult {
   const { address, connected } = useWallet();
   const { showError } = useToast();
+  const { contractId, rpcUrl } = useNetwork();
+  const submitTx = useSubmitTx();
+
+  const client = useMemo(() => new LinkoraClient({ contractId, rpcUrl }), [contractId, rpcUrl]);
+
   const [liked, setLiked] = useState(initialHasLiked);
   const [likeCount, setLikeCount] = useState(initialLikeCount);
   const [pending, setPending] = useState(false);
@@ -65,21 +68,20 @@ export function useLike({
     setLikeCount((current) => current + 1);
 
     try {
-      await likePostTransaction(address, postId);
+      const convertedPostId = typeof postId === "number" ? postId : BigInt(postId);
+      const txXdr = client.likePost(address, convertedPostId);
+      await submitTx(txXdr);
       return true;
     } catch (err) {
       setLiked(false);
       setLikeCount((current) => Math.max(0, current - 1));
       const message = err instanceof Error ? err.message : "Failed to like post.";
       setError(message);
-      showError(message);
       return false;
     } finally {
       setPending(false);
     }
-  }, [address, connected, liked, pending, postId, showError]);
+  }, [address, connected, liked, pending, postId, showError, client, submitTx]);
 
   return { liked, likeCount, pending, error, like };
 }
-
-export { likePostTransaction };

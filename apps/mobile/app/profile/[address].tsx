@@ -9,6 +9,7 @@ import { useWallet } from "../../hooks/useWallet";
 import ProfileHeader from "../../components/ProfileHeader";
 import { PostCard } from "../../components/PostCard";
 import { AnalyticsCard } from "../../components/AnalyticsCard";
+import { EmptyState } from "../../components/states/EmptyState";
 
 type ProfileParams = {
   address: string;
@@ -76,12 +77,9 @@ export default function ProfileDetailScreen() {
         }}
         refreshing={postsLoading}
         contentContainerStyle={styles.list}
-        ListEmptyComponent={() => (
-          <View style={styles.empty}>
-            <Text style={styles.emptyTitle}>No posts yet</Text>
-            <Text style={styles.emptyText}>This user hasn't posted anything.</Text>
-          </View>
-        )}
+        ListEmptyComponent={
+          <EmptyState icon="📭" title="No posts yet" subtitle="This user hasn't posted anything." />
+        }
       />
     </View>
   );
@@ -117,18 +115,6 @@ function createStyles(theme: ReturnType<typeof useTheme>["theme"]) {
       paddingBottom: 48,
       backgroundColor: theme.colors.surface.background,
     },
-    empty: {
-      padding: 24,
-      alignItems: "center",
-    },
-    emptyTitle: {
-      color: theme.colors.text.primary,
-      fontSize: 16,
-      fontWeight: "700",
-    },
-    emptyText: {
-      color: theme.colors.text.secondary,
-      marginTop: 8,
-    },
+
   });
 }

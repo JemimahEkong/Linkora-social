@@ -163,4 +163,16 @@ export class DmService {
     // Send via relay
     await this.relayClient.sendMessage(signingKeypair, toAddress, encrypted, messageIndex);
   }
+
+  connectRealTime() {
+    this.relayClient.connectWs(this.userAddress);
+  }
+
+  onRealTimeEvent(listener: (payload: any) => void) {
+    return this.relayClient.onMessage(listener);
+  }
+
+  sendTypingStatus(toAddress: string) {
+    this.relayClient.sendTypingStatus(toAddress);
+  }
 }

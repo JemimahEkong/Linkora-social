@@ -1,0 +1,99 @@
+name: Deploy Testnet
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: Build, Deploy, Codegen, Canary
+    runs-on: ubuntu-latest
+    env:
+      NETWORK: testnet
+      ADMIN_SECRET: ${{ secrets.ADMIN_SECRET }}
+      TREASURY_ADDRESS: ${{ secrets.TREASURY_ADDRESS }}
+      FEE_BPS: ${{ vars.FEE_BPS || '0' }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Validate required secrets
+        run: |
+          test -n "$ADMIN_SECRET" || { echo "::error::ADMIN_SECRET is required"; exit 1; }
+          test -n "$TREASURY_ADDRESS" || { echo "::error::TREASURY_ADDRESS is required"; exit 1; }
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32v1-none
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: packages/contracts
+
+      - name: Install stellar-cli
+        run: cargo install --locked stellar-cli
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build WASM, deploy contract, initialize
+        id: deploy
+        run: ./scripts/deploy_testnet.sh
+
+      - name: Add deployment summary
+        run: |
+          {
+            echo "## Linkora Testnet deployment"
+            echo ""
+            echo "- Network: $NETWORK"
+            echo "- CONTRACT_ID: \`${{ steps.deploy.outputs.contract_id }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Run codegen against deployed contract
+        env:
+          NEXT_PUBLIC_CONTRACT_ID: ${{ steps.deploy.outputs.contract_id }}
+          CONTRACT_ID: ${{ steps.deploy.outputs.contract_id }}
+        run: pnpm codegen
+
+      - name: Prepare SDK canary version
+        working-directory: packages/sdk
+        run: |
+          node <<'NODE'
+            const fs = require('fs');
+            const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+            const base = pkg.version.split('-')[0];
+            const stamp = new Date().toISOString().replace(/[-:.TZ]/g, '').slice(0, 14);
+            pkg.version = `${base}-canary.${stamp}.${process.env.GITHUB_RUN_NUMBER}`;
+            delete pkg.private;
+            pkg.main = './dist/index.js';
+            pkg.types = './dist/index.d.ts';
+            pkg.files = ['dist'];
+            fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+          NODE
+
+      - name: Build SDK
+        working-directory: packages/sdk
+        run: pnpm build
+
+      - name: Publish SDK canary
+        working-directory: packages/sdk
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --access public --tag next

@@ -69,3 +69,22 @@ export async function getStoredPushTokenAsync(): Promise<string | null> {
     return null;
   }
 }
+
+export async function deregisterTokenFromIndexer(address: string): Promise<void> {
+  const indexerUrl = process.env.EXPO_PUBLIC_INDEXER_URL;
+  if (!indexerUrl || !address) {
+    return;
+  }
+
+  try {
+    await fetch(`${indexerUrl.replace(/\/$/, "")}/api/notifications/deregister`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ address }),
+    });
+  } catch (error) {
+    console.error("Error deregistering push token with indexer", error);
+  }
+}

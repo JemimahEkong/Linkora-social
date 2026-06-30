@@ -1,10 +1,11 @@
 "use client";
 
 import React, { useCallback, useEffect, useRef, useState } from "react";
+import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useProfile, type IndexerPost } from "@/hooks/useProfile";
 import { useWallet } from "@/hooks/useWallet";
-import { OptimisticStore, useOptimisticFollow } from "@/lib/OptimisticStore";
+import { OptimisticStore, useOptimisticFollow } from "@/lib/optimisticStore";
 import {
   useLinkoraEvent,
   useWatchAddress,
@@ -13,7 +14,20 @@ import {
 } from "@/lib/LinkoraEventSubscriber";
 import { FollowDrawer } from "@/components/profile/FollowDrawer";
 import { CreatorTokenPanel } from "@/components/profile/CreatorTokenPanel";
-import { LinkoraClient } from "../../../../../../packages/sdk/src/client";
+import {
+  TransactionBuilder,
+  BASE_FEE,
+  Contract,
+  Address,
+  rpc as StellarRpc,
+} from "@stellar/stellar-sdk";
+import { signTransaction } from "@stellar/freighter-api";
+import { LinkoraClient } from "linkora-sdk";
+
+const CONTRACT_ID = process.env.NEXT_PUBLIC_CONTRACT_ID || "CDUMMY";
+const RPC_URL = process.env.NEXT_PUBLIC_RPC_URL || "https://soroban-testnet.stellar.org";
+const NETWORK_PASSPHRASE =
+  process.env.NEXT_PUBLIC_NETWORK_PASSPHRASE || "Test SDF Network ; September 2015";
 
 /* ────────────────────────────────────────────────────────────────────────── */
 /*  Helpers                                                                  */
@@ -46,6 +60,11 @@ export default function ProfilePage() {
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [drawerType, setDrawerType] = useState<"followers" | "following">("followers");
   const [copyFeedback, setCopyFeedback] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [followLoading, setFollowLoading] = useState(false);
+  const [isBlocked, setIsBlocked] = useState(false);
+  const [blocking, setBlocking] = useState(false);
+  const menuRef = useRef<HTMLDivElement>(null);
 
   /* ── Optimistic follow state ────────────────────────────────────────── */
 
@@ -78,42 +97,129 @@ export default function ProfilePage() {
   /* ── Follow / unfollow ──────────────────────────────────────────────── */
 
   const handleFollowToggle = useCallback(async () => {
-    if (!currentUserAddress) return;
+    if (!currentUserAddress || followLoading) return;
 
     const key = `${currentUserAddress}:${address}`;
     const newIsFollowing = !followState.isFollowing;
 
-    // Optimistic UI
+    // Optimistic UI update
     OptimisticStore.setFollowState(key, {
       isFollowing: newIsFollowing,
       followersCount: followState.followersCount + (newIsFollowing ? 1 : -1),
       followingCount: followState.followingCount,
     });
 
+    setFollowLoading(true);
+
     try {
-      const client = new LinkoraClient({
-        contractId: process.env.NEXT_PUBLIC_CONTRACT_ID || "CDUMMY",
-        rpcUrl: process.env.NEXT_PUBLIC_RPC_URL || "https://soroban-testnet.stellar.org",
+      const server = new StellarRpc.Server(RPC_URL);
+      const account = await server.getAccount(currentUserAddress);
+
+      const contract = new Contract(CONTRACT_ID);
+      const op = contract.call(
+        newIsFollowing ? "follow" : "unfollow",
+        Address.fromString(currentUserAddress).toScVal(),
+        Address.fromString(address).toScVal()
+      );
+
+      const tx = new TransactionBuilder(account, {
+        fee: BASE_FEE,
+        networkPassphrase: NETWORK_PASSPHRASE,
+      })
+        .addOperation(op)
+        .setTimeout(30)
+        .build();
+
+      const simulated = await server.simulateTransaction(tx);
+      if (StellarRpc.Api.isSimulationError(simulated)) {
+        throw new Error(`Simulation failed: ${simulated.error}`);
+      }
+
+      const finalTx = StellarRpc.assembleTransaction(tx, simulated).build();
+      const xdrString = finalTx.toXDR();
+
+      const signedXdr = await signTransaction(xdrString, {
+        networkPassphrase: NETWORK_PASSPHRASE,
       });
 
-      // These methods return transaction XDR envelopes.
-      // In production, this XDR would be signed via Freighter and submitted.
-      const _txXdr = newIsFollowing
-        ? client.follow(currentUserAddress, address)
-        : client.unfollow(currentUserAddress, address);
+      const signedTx = TransactionBuilder.fromXDR(signedXdr, NETWORK_PASSPHRASE);
+      const sendResponse = await server.sendTransaction(signedTx);
 
-      // TODO: sign & submit via Freighter — same pattern as mobile's FollowButton.
-      // For now we treat the optimistic update as the final state.
+      if (sendResponse.status === "ERROR") {
+        throw new Error("Transaction failed to submit");
+      }
+
+      let status: string = sendResponse.status;
+      const startTime = Date.now();
+      while (status === "PENDING" && Date.now() - startTime < 30000) {
+        await new Promise((r) => setTimeout(r, 1000));
+        const txResponse = await server.getTransaction(sendResponse.hash);
+        status = txResponse.status as string;
+      }
     } catch (error) {
       console.error("Follow/unfollow failed:", error);
-      // Rollback
+      // Rollback optimistic update
       OptimisticStore.setFollowState(key, {
         isFollowing: !newIsFollowing,
         followersCount: followState.followersCount,
         followingCount: followState.followingCount,
       });
+    } finally {
+      setFollowLoading(false);
     }
-  }, [currentUserAddress, address, followState]);
+  }, [currentUserAddress, address, followState, followLoading]);
+
+  /* ── Check if blocked ──────────────────────────────────────────────── */
+
+  useEffect(() => {
+    if (!currentUserAddress || currentUserAddress === address) {
+      setIsBlocked(false);
+      return;
+    }
+    const client = new LinkoraClient({
+      contractId: process.env.NEXT_PUBLIC_CONTRACT_ID || "CDUMMY",
+      rpcUrl: process.env.NEXT_PUBLIC_RPC_URL || "https://soroban-testnet.stellar.org",
+    });
+    client
+      .isBlocked(currentUserAddress, address)
+      .then(setIsBlocked)
+      .catch(() => setIsBlocked(false));
+  }, [currentUserAddress, address]);
+
+  /* ── Block / Unblock ──────────────────────────────────────────────── */
+
+  const handleBlockToggle = useCallback(async () => {
+    if (!currentUserAddress) return;
+    setBlocking(true);
+    try {
+      const client = new LinkoraClient({
+        contractId: process.env.NEXT_PUBLIC_CONTRACT_ID || "CDUMMY",
+        rpcUrl: process.env.NEXT_PUBLIC_RPC_URL || "https://soroban-testnet.stellar.org",
+      });
+      const _txXdr = isBlocked
+        ? client.unblockUser(currentUserAddress, address)
+        : client.blockUser(currentUserAddress, address);
+      setIsBlocked((prev) => !prev);
+      setMenuOpen(false);
+    } catch (error) {
+      console.error("Block/unblock failed:", error);
+    } finally {
+      setBlocking(false);
+    }
+  }, [currentUserAddress, address, isBlocked]);
+
+  /* ── Close overflow menu on outside click ─────────────────────────── */
+
+  useEffect(() => {
+    if (!menuOpen) return;
+    const handler = (e: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+        setMenuOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [menuOpen]);
 
   /* ── Copy address ───────────────────────────────────────────────────── */
 
@@ -200,7 +306,7 @@ export default function ProfilePage() {
         <section
           id="profile-header"
           aria-label="Profile header"
-          className="flex flex-col md:flex-row items-start md:items-center gap-6 bg-[var(--bg-secondary)] p-6 rounded-2xl border border-[var(--bg-tertiary)]"
+          className="flex flex-col md:flex-row items-start md:items-center gap-4 md:gap-6 bg-[var(--bg-secondary)] p-4 md:p-6 rounded-2xl border border-[var(--bg-tertiary)]"
         >
           {/* Avatar */}
           <img
@@ -228,16 +334,10 @@ export default function ProfilePage() {
               </button>
             </p>
 
-            {profile.bio && (
-              <p id="profile-bio" className="mt-3 text-[var(--text-primary)] leading-relaxed">
-                {profile.bio}
-              </p>
-            )}
-
             {/* Follower / following counts */}
             <div className="flex gap-6 mt-4">
-              <button
-                onClick={() => openDrawer("followers")}
+              <Link
+                href={`/profile/${address}/followers`}
                 className="hover:text-[var(--accent-teal)] transition-colors"
                 aria-label={`View ${followState.followersCount} followers`}
                 id="followers-btn"
@@ -246,10 +346,10 @@ export default function ProfilePage() {
                   {followState.followersCount}
                 </span>{" "}
                 <span className="text-[var(--text-muted)]">Followers</span>
-              </button>
+              </Link>
 
-              <button
-                onClick={() => openDrawer("following")}
+              <Link
+                href={`/profile/${address}/following`}
                 className="hover:text-[var(--accent-teal)] transition-colors"
                 aria-label={`View ${followState.followingCount} following`}
                 id="following-btn"
@@ -258,35 +358,116 @@ export default function ProfilePage() {
                   {followState.followingCount}
                 </span>{" "}
                 <span className="text-[var(--text-muted)]">Following</span>
-              </button>
+              </Link>
             </div>
           </div>
 
-          {/* Follow / Unfollow */}
-          <div className="mt-4 md:mt-0 shrink-0" aria-live="polite">
+          {/* Follow / Unfollow + Overflow menu */}
+          <div
+            className="mt-4 md:mt-0 w-full md:w-auto shrink-0 flex flex-wrap items-center gap-2"
+            aria-live="polite"
+          >
             {!isSelf && currentUserAddress && (
-              <button
-                onClick={handleFollowToggle}
-                id="follow-btn"
-                className={`px-6 py-2 rounded-full font-bold transition-all ${
-                  followState.isFollowing
-                    ? "bg-transparent border border-[var(--text-muted)] text-[var(--text-primary)] hover:bg-[var(--error)] hover:border-[var(--error)] hover:text-white"
-                    : "bg-[var(--accent-coral)] text-white hover:opacity-90"
-                }`}
-                aria-label={
-                  followState.isFollowing
-                    ? `Unfollow ${profile.username}`
-                    : `Follow ${profile.username}`
-                }
-              >
-                {followState.isFollowing ? "Following" : "Follow"}
-              </button>
+              <>
+                <button
+                  onClick={handleFollowToggle}
+                  id="follow-btn"
+                  className={`w-full sm:w-auto px-6 py-2 rounded-full font-bold transition-all ${
+                    followState.isFollowing
+                      ? "bg-transparent border border-[var(--text-muted)] text-[var(--text-primary)] hover:bg-[var(--error)] hover:border-[var(--error)] hover:text-white"
+                      : "bg-[var(--accent-coral)] text-white hover:opacity-90"
+                  }`}
+                  aria-label={
+                    followState.isFollowing
+                      ? `Unfollow ${profile.username}`
+                      : `Follow ${profile.username}`
+                  }
+                >
+                  {followState.isFollowing ? "Following" : "Follow"}
+                </button>
+
+                {/* Overflow menu trigger */}
+                <div ref={menuRef} className="relative">
+                  <button
+                    onClick={() => setMenuOpen((prev) => !prev)}
+                    className="flex items-center justify-center w-10 h-10 rounded-full hover:bg-[var(--bg-tertiary)] transition-colors text-[var(--text-muted)] hover:text-[var(--text-primary)]"
+                    aria-label="More actions"
+                    aria-expanded={menuOpen}
+                  >
+                    <svg
+                      className="w-5 h-5"
+                      fill="none"
+                      viewBox="0 0 24 24"
+                      strokeWidth={1.5}
+                      stroke="currentColor"
+                      aria-hidden="true"
+                    >
+                      <path
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        d="M12 6.75a.75.75 0 110-1.5.75.75 0 010 1.5zM12 12.75a.75.75 0 110-1.5.75.75 0 010 1.5zM12 18.75a.75.75 0 110-1.5.75.75 0 010 1.5z"
+                      />
+                    </svg>
+                  </button>
+
+                  {/* Dropdown menu */}
+                  {menuOpen && (
+                    <div className="absolute right-0 top-full mt-2 z-50 min-w-[180px] rounded-xl border border-[var(--border)] bg-[var(--muted)] p-1.5 shadow-2xl">
+                      <button
+                        onClick={handleBlockToggle}
+                        disabled={blocking}
+                        className="flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)] transition-colors disabled:opacity-50"
+                      >
+                        {blocking ? (
+                          <span className="animate-pulse">Processing...</span>
+                        ) : isBlocked ? (
+                          <>
+                            <svg
+                              className="w-4 h-4"
+                              fill="none"
+                              viewBox="0 0 24 24"
+                              strokeWidth={1.5}
+                              stroke="currentColor"
+                              aria-hidden="true"
+                            >
+                              <path
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                                d="M9 12.75L11.25 15 15 9.75m-3-7.036A11.959 11.959 0 013.598 6 11.99 11.99 0 003 9.749c0 5.592 3.824 10.29 9 11.623 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.571-.598-3.751h-.152c-3.196 0-6.1-1.248-8.25-3.285z"
+                              />
+                            </svg>
+                            Unblock @{profile.username}
+                          </>
+                        ) : (
+                          <>
+                            <svg
+                              className="w-4 h-4"
+                              fill="none"
+                              viewBox="0 0 24 24"
+                              strokeWidth={1.5}
+                              stroke="currentColor"
+                              aria-hidden="true"
+                            >
+                              <path
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                                d="M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728A9 9 0 015.636 5.636m12.728 12.728L5.636 5.636"
+                              />
+                            </svg>
+                            Block @{profile.username}
+                          </>
+                        )}
+                      </button>
+                    </div>
+                  )}
+                </div>
+              </>
             )}
           </div>
         </section>
 
         {/* ── Content grid ─────────────────────────────────────────────── */}
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-8 mt-8">
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-6 md:gap-8 mt-6 md:mt-8">
           {/* Posts feed */}
           <section className="md:col-span-2" aria-label="User posts" id="posts-section">
             <div className="border-b border-[var(--bg-tertiary)] mb-4">

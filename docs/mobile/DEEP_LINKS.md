@@ -21,7 +21,7 @@ Routes resolve to the app screens:
 
 1. Configure the app bundle and associated domains in the Expo config.
 2. Publish an Apple App Site Association file from `https://linkora.social/.well-known/apple-app-site-association`.
-3. Replace `TEAMID` in `packages/web/public/.well-known/apple-app-site-association` with the Apple Developer Team ID for the production iOS app.
+3. Replace `TEAMID` in `apps/web/public/.well-known/apple-app-site-association` with the Apple Developer Team ID for the production iOS app.
 4. Ensure the `appID` is formatted as `TEAMID.social.linkora.app` and contains path patterns for `/post/*`, `/profile/*`, `/pool/*`, and `/dm/*`.
 
 Example structure:

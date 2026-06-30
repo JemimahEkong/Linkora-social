@@ -1,11 +1,19 @@
 #![no_std]
 use soroban_sdk::{
     contract, contracterror, contractevent, contractimpl, contracttype, symbol_short, token,
-    Address, BytesN, Env, Map, String, Symbol, Vec,
+    Address, Bytes, BytesN, Env, Map, String, Symbol, Vec,
 };
 
 #[cfg(test)]
 use soroban_sdk::testutils::storage::Persistent as _;
+
+mod validation;
+
+use validation::{
+    validate_address_list, validate_amount, validate_content, validate_gov_parameter,
+    validate_non_default_address, validate_protocol_fee, validate_report_verdict,
+    validate_u32_range, validate_username,
+};
 
 // ── Storage Key Enum ──────────────────────────────────────────────────────────
 
@@ -32,6 +40,8 @@ pub enum StorageKey {
     FollowersPos(Address, Address), // persistent: (followee, follower) -> u32 position in idx
     GraphMigrated(Address),         // persistent: user -> bool (migration tracking)
     DmPublicKey(Address),           // persistent: user -> X25519 public key for encrypted DMs
+    CredentialRoot(Address),        // persistent: user -> credential Merkle root
+    NullifierSet(Address, BytesN<32>), // persistent: (user, nullifier) -> bool (prevents replay)
     // ── Governance ────────────────────────────────────────────────────────
     GovProposal(u64),      // persistent: proposal_id -> GovProposal
     GovVote(u64, Address), // persistent: (proposal_id, voter) -> bool (prevents double-voting)
@@ -69,6 +79,9 @@ const TIP_COOLDOWN_WINDOW: Symbol = symbol_short!("TIP_CD_W");
 const REGISTERED_USERS: Symbol = symbol_short!("R_USERS");
 const RENT_RATE_BPS_KEY: Symbol = symbol_short!("RENT_BPS");
 const MODERATION_SLASH_BPS: Symbol = symbol_short!("MOD_SL_B");
+const CONTRACT_STATE: Symbol = symbol_short!("CT_STATE");
+const ROLES: Symbol = symbol_short!("ROLES");
+const PAUSED: Symbol = symbol_short!("PAUSED");
 
 // ── TTL Constants ─────────────────────────────────────────────────────────────
 //
@@ -131,6 +144,15 @@ pub struct Pool {
 }
 
 #[contracttype]
+#[derive(Clone, Debug)]
+pub struct ContractState {
+    /// Current contract schema / code version for migration tracking.
+    pub version: u32,
+    /// Last known implementation hash. Updated on each successful upgrade.
+    pub implementation_wasm_hash: Option<BytesN<32>>,
+}
+
+#[contracttype]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ProposalStatus {
     Pending,
@@ -164,6 +186,15 @@ pub enum GovParameter {
 }
 
 #[contracttype]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Role {
+    Admin,
+    Moderator,
+    Pauser,
+    Upgrader,
+}
+
+#[contracttype]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GovStatus {
     Active,
@@ -184,6 +215,7 @@ pub struct GovProposal {
     pub votes_for: u32,
     pub votes_against: u32,
     pub created_ledger: u32,
+    pub time_lock_ledgers: u32,
     pub status: GovStatus,
 }
 
@@ -345,11 +377,33 @@ pub struct ContractUpgraded {
 
 #[contractevent]
 #[derive(Clone)]
+pub struct PausedEvent {
+    #[topic]
+    pub admin: Address,
+}
+
+#[contractevent]
+#[derive(Clone)]
+pub struct UnpausedEvent {
+    #[topic]
+    pub admin: Address,
+}
+
+#[contractevent]
+#[derive(Clone)]
 pub struct PostDeleted {
     #[topic]
     pub post_id: u64,
     #[topic]
     pub author: Address,
+}
+
+#[contractevent]
+#[derive(Clone)]
+pub struct ProfileDeletedEvent {
+    #[topic]
+    pub user: Address,
+    pub username: String,
 }
 
 #[contractevent]
@@ -420,6 +474,23 @@ pub struct DmKeyPublishedEvent {
 
 #[contractevent]
 #[derive(Clone)]
+pub struct CredentialRootUpdatedEvent {
+    #[topic]
+    pub user: Address,
+    pub root: BytesN<32>,
+}
+
+#[contractevent]
+#[derive(Clone)]
+pub struct CredentialVerifiedEvent {
+    #[topic]
+    pub user: Address,
+    #[topic]
+    pub nullifier: BytesN<32>,
+}
+
+#[contractevent]
+#[derive(Clone)]
 pub struct FeeUpdatedEvent {
     #[topic]
     pub name: Symbol,
@@ -435,6 +506,27 @@ pub struct TreasuryUpdatedEvent {
     pub old_treasury: Address,
     pub new_treasury: Address,
 }
+
+#[contractevent]
+#[derive(Clone)]
+pub struct RoleGrantedEvent {
+    #[topic]
+    pub role: Role,
+    #[topic]
+    pub account: Address,
+    pub sender: Address,
+}
+
+#[contractevent]
+#[derive(Clone)]
+pub struct RoleRevokedEvent {
+    #[topic]
+    pub role: Role,
+    #[topic]
+    pub account: Address,
+    pub sender: Address,
+}
+
 #[contractevent]
 #[derive(Clone)]
 pub struct GovProposalCreatedEvent {
@@ -525,35 +617,6 @@ pub struct LinkoraContract;
 
 // ── Validation Helpers ────────────────────────────────────────────────────────
 
-fn validate_username(username: &String) -> Result<(), &'static str> {
-    let len = username.len();
-    if len < MIN_USERNAME_LEN {
-        return Err("username too short");
-    }
-    if len > MAX_USERNAME_LEN {
-        return Err("username too long");
-    }
-    let bytes = username.to_bytes();
-    for i in 0..bytes.len() {
-        let c = bytes.get(i).unwrap() as char;
-        if !c.is_ascii_alphanumeric() && c != '_' {
-            return Err("invalid username character");
-        }
-    }
-    Ok(())
-}
-
-fn validate_content(content: &String) -> Result<(), &'static str> {
-    let len = content.len();
-    if len < MIN_CONTENT_LEN {
-        return Err("empty content");
-    }
-    if len > MAX_CONTENT_LEN {
-        return Err("content too long");
-    }
-    Ok(())
-}
-
 fn paginate<T>(env: &Env, list: &Vec<T>, offset: u32, limit: u32) -> Vec<T>
 where
     T: soroban_sdk::TryFromVal<Env, soroban_sdk::Val>
@@ -586,15 +649,92 @@ impl LinkoraContract {
         {
             panic!("already initialized");
         }
-        assert!(fee_bps <= 10_000, "invalid fee");
+        admin.require_auth();
+        validate_non_default_address(&env, "admin", &admin);
+        validate_non_default_address(&env, "treasury", &treasury);
+        validate_protocol_fee(&env, fee_bps);
         env.storage().instance().set(&INITIALIZED, &true);
         env.storage().instance().set(&ADMIN, &admin);
+        let mut roles = Map::new(&env);
+        roles.set(
+            admin.clone(),
+            Self::role_mask(Role::Admin) | Self::role_mask(Role::Upgrader),
+        );
+        env.storage().instance().set(&ROLES, &roles);
         env.storage().instance().set(&TREASURY, &treasury);
         env.storage().instance().set(&FEE_BPS, &fee_bps);
         env.storage()
             .instance()
             .set(&TIP_COOLDOWN_WINDOW, &TIP_COOLDOWN_LEDGERS);
         env.storage().instance().set(&MODERATION_SLASH_BPS, &0u32);
+        env.storage().instance().set(
+            &CONTRACT_STATE,
+            &ContractState {
+                version: 1,
+                implementation_wasm_hash: None,
+            },
+        );
+
+        RoleGrantedEvent {
+            role: Role::Admin,
+            account: admin.clone(),
+            sender: admin.clone(),
+        }
+        .publish(&env);
+
+        RoleGrantedEvent {
+            role: Role::Upgrader,
+            account: admin.clone(),
+            sender: admin,
+        }
+        .publish(&env);
+    }
+
+    pub fn grant_role(env: Env, admin: Address, account: Address, role: Role) {
+        Self::bump_instance(&env);
+        admin.require_auth();
+        validate_non_default_address(&env, "admin", &admin);
+        validate_non_default_address(&env, "account", &account);
+        Self::require_role(&env, &admin, Role::Admin);
+
+        let mut roles = Self::get_roles(&env);
+        let current = roles.get(account.clone()).unwrap_or(0);
+        let updated = current | Self::role_mask(role);
+        roles.set(account.clone(), updated);
+        env.storage().instance().set(&ROLES, &roles);
+
+        RoleGrantedEvent {
+            role,
+            account,
+            sender: admin,
+        }
+        .publish(&env);
+    }
+
+    pub fn revoke_role(env: Env, admin: Address, account: Address, role: Role) {
+        Self::bump_instance(&env);
+        admin.require_auth();
+        validate_non_default_address(&env, "admin", &admin);
+        validate_non_default_address(&env, "account", &account);
+        Self::require_role(&env, &admin, Role::Admin);
+
+        let mut roles = Self::get_roles(&env);
+        let current = roles.get(account.clone()).unwrap_or(0);
+        let updated = current & !Self::role_mask(role);
+        roles.set(account.clone(), updated);
+        env.storage().instance().set(&ROLES, &roles);
+
+        RoleRevokedEvent {
+            role,
+            account,
+            sender: admin,
+        }
+        .publish(&env);
+    }
+
+    pub fn has_role(env: Env, account: Address, role: Role) -> bool {
+        validate_non_default_address(&env, "account", &account);
+        Self::has_role_internal(&env, &account, role)
     }
 
     // ── Profiles ──────────────────────────────────────────────────────────────
@@ -602,7 +742,9 @@ impl LinkoraContract {
     pub fn set_profile(env: Env, user: Address, username: String, creator_token: Address) {
         Self::bump_instance(&env);
         user.require_auth();
-        validate_username(&username).expect("invalid username");
+        validate_non_default_address(&env, "user", &user);
+        validate_non_default_address(&env, "creator_token", &creator_token);
+        validate_username(&env, &username);
 
         let key = StorageKey::Profile(user.clone());
         let username_index_key = StorageKey::UsernameIndex(username.clone());
@@ -671,6 +813,7 @@ impl LinkoraContract {
     }
 
     pub fn get_profile(env: Env, user: Address) -> Option<Profile> {
+        validate_non_default_address(&env, "user", &user);
         let key = StorageKey::Profile(user.clone());
         #[cfg(test)]
         let exists = {
@@ -713,12 +856,19 @@ impl LinkoraContract {
     pub fn delete_profile(env: Env, user: Address) {
         Self::bump_instance(&env);
         user.require_auth();
+        validate_non_default_address(&env, "user", &user);
         let key = StorageKey::Profile(user.clone());
         let profile: Profile = env
             .storage()
             .persistent()
             .get(&key)
             .unwrap_or_else(|| panic!("profile does not exist"));
+
+        ProfileDeletedEvent {
+            user: user.clone(),
+            username: profile.username.clone(),
+        }
+        .publish(&env);
 
         env.storage()
             .persistent()
@@ -747,6 +897,7 @@ impl LinkoraContract {
     }
 
     pub fn get_address_by_username(env: Env, username: String) -> Option<Address> {
+        validate_username(&env, &username);
         let key = StorageKey::UsernameIndex(username);
         let result: Option<Address> = env.storage().persistent().get(&key);
         if result.is_some() {
@@ -757,11 +908,84 @@ impl LinkoraContract {
 
     // ── DM Key Management ─────────────────────────────────────────────────────
 
+    pub fn update_credential_root(
+        env: Env,
+        user: Address,
+        new_root: BytesN<32>,
+        signature: BytesN<64>,
+    ) {
+        Self::bump_instance(&env);
+        user.require_auth();
+        validate_non_default_address(&env, "user", &user);
+
+        let _message_hash = Self::credential_root_message_hash(&env, &new_root);
+        let _signature = signature;
+
+        let key = StorageKey::CredentialRoot(user.clone());
+        env.storage().persistent().set(&key, &new_root);
+        Self::bump(&env, &key);
+
+        CredentialRootUpdatedEvent {
+            user,
+            root: new_root,
+        }
+        .publish(&env);
+    }
+
+    pub fn verify_credential(
+        env: Env,
+        user: Address,
+        proof: Vec<BytesN<32>>,
+        leaf: BytesN<32>,
+        nullifier: BytesN<32>,
+    ) -> bool {
+        Self::bump_instance(&env);
+        validate_non_default_address(&env, "user", &user);
+
+        let root_key = StorageKey::CredentialRoot(user.clone());
+        let expected_root: Option<BytesN<32>> = env.storage().persistent().get(&root_key);
+        if expected_root.is_none() {
+            return false;
+        }
+
+        let nullifier_key = StorageKey::NullifierSet(user.clone(), nullifier.clone());
+        if env.storage().persistent().has(&nullifier_key) {
+            return false;
+        }
+
+        let mut computed = leaf;
+        for sibling in proof.iter() {
+            computed = Self::hash_merkle_pair(&env, &computed, &sibling);
+        }
+
+        if computed != expected_root.unwrap() {
+            return false;
+        }
+
+        env.storage().persistent().set(&nullifier_key, &true);
+        Self::bump(&env, &root_key);
+        Self::bump(&env, &nullifier_key);
+
+        CredentialVerifiedEvent { user, nullifier }.publish(&env);
+        true
+    }
+
+    pub fn get_credential_root(env: Env, user: Address) -> Option<BytesN<32>> {
+        validate_non_default_address(&env, "user", &user);
+        let key = StorageKey::CredentialRoot(user);
+        let result: Option<BytesN<32>> = env.storage().persistent().get(&key);
+        if result.is_some() {
+            Self::bump(&env, &key);
+        }
+        result
+    }
+
     /// Publish a user's X25519 public key for encrypted direct messages.
     /// This key is separate from the Stellar signing key for security reasons.
     pub fn publish_dm_key(env: Env, user: Address, x25519_pubkey: BytesN<32>) {
         Self::bump_instance(&env);
         user.require_auth();
+        validate_non_default_address(&env, "user", &user);
 
         let key = StorageKey::DmPublicKey(user.clone());
         env.storage().persistent().set(&key, &x25519_pubkey);
@@ -777,6 +1001,7 @@ impl LinkoraContract {
     /// Retrieve a user's X25519 public key for encrypted direct messages.
     /// Returns None if the user has not published a DM key.
     pub fn get_dm_key(env: Env, user: Address) -> Option<BytesN<32>> {
+        validate_non_default_address(&env, "user", &user);
         let key = StorageKey::DmPublicKey(user);
         let result: Option<BytesN<32>> = env.storage().persistent().get(&key);
         if result.is_some() {
@@ -790,6 +1015,14 @@ impl LinkoraContract {
     pub fn follow(env: Env, follower: Address, followee: Address) {
         Self::bump_instance(&env);
         follower.require_auth();
+        validate_non_default_address(&env, "follower", &follower);
+        validate_non_default_address(&env, "followee", &followee);
+        require_with_error!(
+            &env,
+            follower != followee,
+            "follower and followee must be different"
+        );
+        Self::require_not_paused(&env);
 
         if Self::is_blocked(env.clone(), followee.clone(), follower.clone()) {
             panic!("blocked");
@@ -892,6 +1125,14 @@ impl LinkoraContract {
     pub fn unfollow(env: Env, follower: Address, followee: Address) {
         Self::bump_instance(&env);
         follower.require_auth();
+        validate_non_default_address(&env, "follower", &follower);
+        validate_non_default_address(&env, "followee", &followee);
+        require_with_error!(
+            &env,
+            follower != followee,
+            "follower and followee must be different"
+        );
+        Self::require_not_paused(&env);
 
         let edge_key = StorageKey::Edge(follower.clone(), followee.clone());
 
@@ -914,6 +1155,7 @@ impl LinkoraContract {
     }
 
     pub fn get_following(env: Env, user: Address, offset: u32, limit: u32) -> Vec<Address> {
+        validate_non_default_address(&env, "user", &user);
         assert!(
             limit > 0 && limit <= MAX_PAGINATION_LIMIT,
             "limit must be between 1 and 50"
@@ -922,6 +1164,7 @@ impl LinkoraContract {
     }
 
     pub fn get_followers(env: Env, user: Address, offset: u32, limit: u32) -> Vec<Address> {
+        validate_non_default_address(&env, "user", &user);
         assert!(
             limit > 0 && limit <= MAX_PAGE_LIMIT,
             "limit must be between 1 and 50"
@@ -932,11 +1175,17 @@ impl LinkoraContract {
     /// Admin function to migrate users from the legacy Vec-based social graph
     /// to the new adjacency-set layout. Processable in chunks of up to 50
     /// users per call. Idempotent: already-migrated edges are skipped.
-    pub fn migrate_follow_graph(env: Env, users: Vec<Address>) {
+    pub fn migrate_follow_graph(env: Env, admin: Address, users: Vec<Address>) {
         Self::bump_instance(&env);
-        Self::require_admin(&env);
-
-        assert!(users.len() <= 50, "batch size must not exceed 50 users");
+        admin.require_auth();
+        validate_non_default_address(&env, "admin", &admin);
+        Self::require_role(&env, &admin, Role::Admin);
+        validate_address_list(&env, "users", &users);
+        require_with_error!(
+            &env,
+            users.len() <= 50,
+            "batch size must not exceed 50 users"
+        );
 
         for user in users.iter() {
             let migrated_key = StorageKey::GraphMigrated(user.clone());
@@ -1062,6 +1311,14 @@ impl LinkoraContract {
     pub fn block_user(env: Env, blocker: Address, blocked: Address) {
         Self::bump_instance(&env);
         blocker.require_auth();
+        validate_non_default_address(&env, "blocker", &blocker);
+        validate_non_default_address(&env, "blocked", &blocked);
+        require_with_error!(
+            &env,
+            blocker != blocked,
+            "blocker and blocked must be different"
+        );
+        Self::require_not_paused(&env);
         let key = StorageKey::Blocks(blocker.clone());
         let mut blocks: Map<Address, ()> = env
             .storage()
@@ -1077,6 +1334,14 @@ impl LinkoraContract {
     pub fn unblock_user(env: Env, blocker: Address, blocked: Address) {
         Self::bump_instance(&env);
         blocker.require_auth();
+        validate_non_default_address(&env, "blocker", &blocker);
+        validate_non_default_address(&env, "blocked", &blocked);
+        require_with_error!(
+            &env,
+            blocker != blocked,
+            "blocker and blocked must be different"
+        );
+        Self::require_not_paused(&env);
         let key = StorageKey::Blocks(blocker.clone());
         let mut blocks: Map<Address, ()> = env
             .storage()
@@ -1090,6 +1355,8 @@ impl LinkoraContract {
     }
 
     pub fn is_blocked(env: Env, blocker: Address, blocked: Address) -> bool {
+        validate_non_default_address(&env, "blocker", &blocker);
+        validate_non_default_address(&env, "blocked", &blocked);
         let blocks: Map<Address, ()> = env
             .storage()
             .persistent()
@@ -1103,6 +1370,9 @@ impl LinkoraContract {
     pub fn create_post(env: Env, author: Address, content: String, parent_id: Option<u64>) -> u64 {
         Self::bump_instance(&env);
         author.require_auth();
+        validate_non_default_address(&env, "author", &author);
+        validate_content(&env, &content);
+        Self::require_not_paused(&env);
         validate_content(&content).expect("invalid content");
 
         let id: u64 = env.storage().instance().get(&POST_CT).unwrap_or(0u64) + 1;
@@ -1239,6 +1509,7 @@ impl LinkoraContract {
     }
 
     pub fn get_post(env: Env, id: u64) -> Option<Post> {
+        require_with_error!(&env, id > 0, "post id must be positive");
         let key = StorageKey::Post(id);
         let result: Option<Post> = env.storage().persistent().get(&key);
         if result.is_some() {
@@ -1250,6 +1521,9 @@ impl LinkoraContract {
     pub fn delete_post(env: Env, author: Address, post_id: u64) {
         Self::bump_instance(&env);
         author.require_auth();
+        validate_non_default_address(&env, "author", &author);
+        require_with_error!(&env, post_id > 0, "post id must be positive");
+        Self::require_not_paused(&env);
         let key = StorageKey::Post(post_id);
         let post: Post = env.storage().persistent().get(&key).unwrap_or_else(|| {
             panic!("post does not exist: {}", post_id);
@@ -1341,6 +1615,7 @@ impl LinkoraContract {
     }
 
     pub fn get_posts_by_author(env: Env, author: Address, offset: u32, limit: u32) -> Vec<u64> {
+        validate_non_default_address(&env, "author", &author);
         assert!(
             limit > 0 && limit <= MAX_PAGINATION_LIMIT,
             "limit must be between 1 and 50"
@@ -1413,6 +1688,9 @@ impl LinkoraContract {
     pub fn like_post(env: Env, user: Address, post_id: u64) {
         Self::bump_instance(&env);
         user.require_auth();
+        validate_non_default_address(&env, "user", &user);
+        require_with_error!(&env, post_id > 0, "post id must be positive");
+        Self::require_not_paused(&env);
 
         let like_key = StorageKey::Like(post_id, user.clone());
         if env.storage().persistent().has(&like_key) {
@@ -1434,12 +1712,15 @@ impl LinkoraContract {
     }
 
     pub fn get_like_count(env: Env, post_id: u64) -> u64 {
+        require_with_error!(&env, post_id > 0, "post id must be positive");
         let key = StorageKey::Post(post_id);
         let result: Option<Post> = env.storage().persistent().get(&key);
         result.map(|p| p.like_count).unwrap_or(0)
     }
 
     pub fn has_liked(env: Env, user: Address, post_id: u64) -> bool {
+        validate_non_default_address(&env, "user", &user);
+        require_with_error!(&env, post_id > 0, "post id must be positive");
         let key = StorageKey::Like(post_id, user);
         env.storage().persistent().has(&key)
     }
@@ -1448,8 +1729,11 @@ impl LinkoraContract {
 
     pub fn tip(env: Env, tipper: Address, post_id: u64, token: Address, amount: i128) {
         Self::bump_instance(&env);
-        assert!(amount > 0, "tip amount must be positive");
         tipper.require_auth();
+        validate_non_default_address(&env, "tipper", &tipper);
+        validate_non_default_address(&env, "token", &token);
+        require_with_error!(&env, post_id > 0, "post id must be positive");
+        validate_amount(&env, "tip amount", amount);
 
         let key = StorageKey::Post(post_id);
         let mut post: Post = env.storage().persistent().get(&key).unwrap_or_else(|| {
@@ -1484,8 +1768,13 @@ impl LinkoraContract {
         Self::bump_temp(&env, &cooldown_key);
 
         let fee_bps = Self::get_fee_bps(env.clone());
-        let fee_amount = (amount * fee_bps as i128) / 10_000;
+        let fee_amount =
+            (amount / 10_000) * fee_bps as i128 + (amount % 10_000) * fee_bps as i128 / 10_000;
         let author_amount = amount - fee_amount;
+        post.tip_total += author_amount;
+        env.storage().persistent().set(&key, &post);
+        Self::bump(&env, &key);
+
         let token_client = token::Client::new(&env, &token);
 
         if fee_amount > 0 {
@@ -1497,10 +1786,6 @@ impl LinkoraContract {
             token_client.transfer(&tipper, &treasury, &fee_amount);
         }
         token_client.transfer(&tipper, &post.author, &author_amount);
-
-        post.tip_total += amount;
-        env.storage().persistent().set(&key, &post);
-        Self::bump(&env, &key);
 
         TipEvent {
             tipper,
@@ -1524,7 +1809,10 @@ impl LinkoraContract {
     ) {
         Self::bump_instance(&env);
         admin.require_auth();
-        Self::require_admin(&env);
+        validate_non_default_address(&env, "admin", &admin);
+        validate_non_default_address(&env, "token", &token);
+        validate_address_list(&env, "initial_admins", &initial_admins);
+        Self::require_role(&env, &admin, Role::Admin);
         let key = StorageKey::Pool(pool_id.clone());
         assert!(!env.storage().persistent().has(&key), "pool exists");
         assert!(
@@ -1563,7 +1851,9 @@ impl LinkoraContract {
         amount: i128,
     ) {
         Self::bump_instance(&env);
-        assert!(amount > 0, "must be positive");
+        validate_non_default_address(&env, "depositor", &depositor);
+        validate_non_default_address(&env, "token", &token);
+        validate_amount(&env, "deposit amount", amount);
         depositor.require_auth();
         let key = StorageKey::Pool(pool_id.clone());
         let mut pool: Pool = env
@@ -1573,14 +1863,15 @@ impl LinkoraContract {
             .expect("pool not found");
         assert!(pool.token == token, "wrong token for pool");
 
+        pool.balance += amount;
+        env.storage().persistent().set(&key, &pool);
+        Self::bump(&env, &key);
+
         token::Client::new(&env, &token).transfer(
             &depositor,
             env.current_contract_address(),
             &amount,
         );
-        pool.balance += amount;
-        env.storage().persistent().set(&key, &pool);
-        Self::bump(&env, &key);
 
         PoolDepositEvent {
             depositor,
@@ -1599,7 +1890,9 @@ impl LinkoraContract {
         recipient: Address,
     ) {
         Self::bump_instance(&env);
-        assert!(amount > 0, "must be positive");
+        validate_address_list(&env, "signers", &signers);
+        validate_non_default_address(&env, "recipient", &recipient);
+        validate_amount(&env, "withdraw amount", amount);
         let key = StorageKey::Pool(pool_id.clone());
         let mut pool: Pool = env
             .storage()
@@ -1656,6 +1949,8 @@ impl LinkoraContract {
 
     pub fn add_pool_admin(env: Env, signers: Vec<Address>, pool_id: Symbol, new_admin: Address) {
         Self::bump_instance(&env);
+        validate_address_list(&env, "signers", &signers);
+        validate_non_default_address(&env, "new_admin", &new_admin);
         let key = StorageKey::Pool(pool_id.clone());
         let mut pool: Pool = env
             .storage()
@@ -1686,6 +1981,8 @@ impl LinkoraContract {
 
     pub fn remove_pool_admin(env: Env, signers: Vec<Address>, pool_id: Symbol, admin: Address) {
         Self::bump_instance(&env);
+        validate_address_list(&env, "signers", &signers);
+        validate_non_default_address(&env, "admin", &admin);
         let key = StorageKey::Pool(pool_id.clone());
         let mut pool: Pool = env
             .storage()
@@ -1725,7 +2022,8 @@ impl LinkoraContract {
 
     pub fn update_pool_threshold(env: Env, signers: Vec<Address>, pool_id: Symbol, threshold: u32) {
         Self::bump_instance(&env);
-        assert!(threshold > 0, "threshold must be positive");
+        validate_address_list(&env, "signers", &signers);
+        validate_u32_range(&env, "threshold", threshold, 1, MAX_QUORUM);
         let key = StorageKey::Pool(pool_id.clone());
         let mut pool: Pool = env
             .storage()
@@ -1762,9 +2060,13 @@ impl LinkoraContract {
 
     // ── Fee & Treasury ────────────────────────────────────────────────────────
 
-    pub fn set_fee(env: Env, fee_bps: u32) {
+    pub fn set_fee(env: Env, admin: Address, fee_bps: u32) {
         Self::bump_instance(&env);
-        Self::require_admin(&env);
+        admin.require_auth();
+        validate_non_default_address(&env, "admin", &admin);
+        Self::require_role(&env, &admin, Role::Admin);
+        validate_protocol_fee(&env, fee_bps);
+        Self::require_not_paused(&env);
         assert!(fee_bps <= 10_000, "invalid fee");
         let old_fee_bps = Self::get_fee_bps(env.clone());
         env.storage().instance().set(&FEE_BPS, &fee_bps);
@@ -1780,9 +2082,13 @@ impl LinkoraContract {
         .publish(&env);
     }
 
-    pub fn set_treasury(env: Env, treasury: Address) {
+    pub fn set_treasury(env: Env, admin: Address, treasury: Address) {
         Self::bump_instance(&env);
-        Self::require_admin(&env);
+        admin.require_auth();
+        validate_non_default_address(&env, "admin", &admin);
+        Self::require_role(&env, &admin, Role::Admin);
+        validate_non_default_address(&env, "treasury", &treasury);
+        Self::require_not_paused(&env);
         let old_treasury = Self::get_treasury(env.clone()).expect("treasury not set");
         env.storage().instance().set(&TREASURY, &treasury);
         TreasuryUpdatedEvent {
@@ -1805,9 +2111,13 @@ impl LinkoraContract {
         env.storage().instance().get(&TREASURY)
     }
 
-    pub fn set_tip_cooldown_window(env: Env, cooldown_ledgers: u32) {
+    pub fn set_tip_cooldown_window(env: Env, admin: Address, cooldown_ledgers: u32) {
         Self::bump_instance(&env);
-        Self::require_admin(&env);
+        admin.require_auth();
+        validate_non_default_address(&env, "admin", &admin);
+        Self::require_role(&env, &admin, Role::Admin);
+        validate_u32_range(&env, "cooldown_ledgers", cooldown_ledgers, 1, u32::MAX);
+        Self::require_not_paused(&env);
         assert!(cooldown_ledgers > 0, "cooldown must be positive");
         env.storage()
             .instance()
@@ -1825,6 +2135,7 @@ impl LinkoraContract {
 
     pub fn gov_init_config(
         env: Env,
+        admin: Address,
         quorum: u32,
         time_lock_ledgers: u32,
         vote_window_ledgers: u32,
@@ -1832,11 +2143,26 @@ impl LinkoraContract {
         quorum_floor: u32,
     ) {
         Self::bump_instance(&env);
-        Self::require_admin(&env);
-        assert!(quorum > 0 && quorum <= 100, "quorum must be 1-100");
-        assert!(quorum_floor <= quorum, "floor must be <= quorum");
-        assert!(time_lock_ledgers > 0, "time_lock must be positive");
-        assert!(vote_window_ledgers > 0, "vote_window must be positive");
+        admin.require_auth();
+        validate_non_default_address(&env, "admin", &admin);
+        Self::require_role(&env, &admin, Role::Admin);
+        validate_u32_range(&env, "quorum", quorum, 1, MAX_QUORUM);
+        validate_u32_range(&env, "time_lock_ledgers", time_lock_ledgers, 1, u32::MAX);
+        validate_u32_range(
+            &env,
+            "vote_window_ledgers",
+            vote_window_ledgers,
+            1,
+            u32::MAX,
+        );
+        require_with_error!(&env, quorum_floor <= quorum, "floor must be <= quorum");
+        validate_u32_range(
+            &env,
+            "quorum_decay_rate_bps",
+            quorum_decay_rate_bps,
+            0,
+            MAX_FEE_BPS,
+        );
 
         let config = GovConfig {
             quorum,
@@ -1870,16 +2196,40 @@ impl LinkoraContract {
     ) -> u64 {
         Self::bump_instance(&env);
         proposer.require_auth();
-
-        if parameter == GovParameter::Treasury {
-            assert!(
-                new_address.is_some(),
-                "treasury proposals require new_address"
-            );
+        validate_non_default_address(&env, "proposer", &proposer);
+        validate_gov_parameter(&env, &parameter);
+        require_with_error!(
+            &env,
+            new_value <= u32::MAX as u64,
+            "new_value must fit in u32"
+        );
+        let new_value_u32 = new_value as u32;
+        match parameter {
+            GovParameter::FeeBps | GovParameter::ModerationSlashBps => {
+                validate_u32_range(&env, "new_value", new_value_u32, 0, MAX_FEE_BPS)
+            }
+            GovParameter::GovQuorum => {
+                validate_u32_range(&env, "new_value", new_value_u32, 1, MAX_QUORUM)
+            }
+            GovParameter::GovTimeLock
+            | GovParameter::GovVoteWindow
+            | GovParameter::TipCooldownWindow => {
+                validate_u32_range(&env, "new_value", new_value_u32, 1, u32::MAX)
+            }
+            GovParameter::Treasury => {
+                require_with_error!(
+                    &env,
+                    new_address.is_some(),
+                    "treasury proposals require new_address"
+                );
+            }
+        }
+        if let Some(address) = &new_address {
+            validate_non_default_address(&env, "new_address", address);
         }
 
         let config_key = StorageKey::GovConfig;
-        let _config: GovConfig = env
+        let config: GovConfig = env
             .storage()
             .persistent()
             .get(&config_key)
@@ -1898,6 +2248,7 @@ impl LinkoraContract {
             votes_for: 0,
             votes_against: 0,
             created_ledger: env.ledger().sequence(),
+            time_lock_ledgers: config.time_lock_ledgers,
             status: GovStatus::Active,
         };
 
@@ -1921,6 +2272,8 @@ impl LinkoraContract {
     pub fn gov_vote(env: Env, voter: Address, proposal_id: u64, support: bool) {
         Self::bump_instance(&env);
         voter.require_auth();
+        validate_non_default_address(&env, "voter", &voter);
+        require_with_error!(&env, proposal_id > 0, "proposal id must be positive");
 
         let config_key = StorageKey::GovConfig;
         let config: GovConfig = env
@@ -1998,6 +2351,7 @@ impl LinkoraContract {
 
     pub fn gov_execute(env: Env, proposal_id: u64) {
         Self::bump_instance(&env);
+        require_with_error!(&env, proposal_id > 0, "proposal id must be positive");
 
         let config_key = StorageKey::GovConfig;
         let config: GovConfig = env
@@ -2018,7 +2372,7 @@ impl LinkoraContract {
 
         let current_ledger = env.ledger().sequence();
         let vote_end = proposal.created_ledger + config.vote_window_ledgers;
-        let execution_after = vote_end + config.time_lock_ledgers;
+        let execution_after = vote_end + proposal.time_lock_ledgers as u64;
         assert!(current_ledger >= execution_after, "time-lock not expired");
 
         let total_votes = proposal.votes_for + proposal.votes_against;
@@ -2031,7 +2385,7 @@ impl LinkoraContract {
         match proposal.parameter {
             GovParameter::FeeBps => {
                 let val = proposal.new_value as u32;
-                assert!(val <= 10_000, "invalid fee");
+                validate_u32_range(&env, "fee_bps", val, 0, MAX_FEE_BPS);
                 env.storage().instance().set(&FEE_BPS, &val);
             }
             GovParameter::Treasury => {
@@ -2039,37 +2393,43 @@ impl LinkoraContract {
                     .new_address
                     .clone()
                     .expect("treasury proposal missing new_address");
+                validate_non_default_address(&env, "new_address", &addr);
                 env.storage().instance().set(&TREASURY, &addr);
             }
             GovParameter::TipCooldownWindow => {
                 let val = proposal.new_value as u32;
-                assert!(val > 0, "cooldown must be positive");
+                validate_u32_range(&env, "cooldown_ledgers", val, 1, u32::MAX);
                 env.storage().instance().set(&TIP_COOLDOWN_WINDOW, &val);
             }
             GovParameter::GovQuorum => {
                 let val = proposal.new_value as u32;
-                assert!(val > 0 && val <= 100, "quorum must be 1-100");
+                validate_u32_range(&env, "quorum", val, 1, MAX_QUORUM);
+                require_with_error!(
+                    &env,
+                    val >= config.quorum_floor,
+                    "quorum must be >= quorum_floor"
+                );
                 let mut cfg = config.clone();
                 cfg.quorum = val;
                 env.storage().persistent().set(&StorageKey::GovConfig, &cfg);
             }
             GovParameter::GovTimeLock => {
                 let val = proposal.new_value as u32;
-                assert!(val > 0, "time_lock must be positive");
+                validate_u32_range(&env, "time_lock_ledgers", val, 1, u32::MAX);
                 let mut cfg = config.clone();
                 cfg.time_lock_ledgers = val;
                 env.storage().persistent().set(&StorageKey::GovConfig, &cfg);
             }
             GovParameter::GovVoteWindow => {
                 let val = proposal.new_value as u32;
-                assert!(val > 0, "vote_window must be positive");
+                validate_u32_range(&env, "vote_window_ledgers", val, 1, u32::MAX);
                 let mut cfg = config.clone();
                 cfg.vote_window_ledgers = val;
                 env.storage().persistent().set(&StorageKey::GovConfig, &cfg);
             }
             GovParameter::ModerationSlashBps => {
                 let val = proposal.new_value as u32;
-                assert!(val <= 10_000, "invalid slash bps");
+                validate_u32_range(&env, "moderation_slash_bps", val, 0, MAX_FEE_BPS);
                 env.storage().instance().set(&MODERATION_SLASH_BPS, &val);
             }
         }
@@ -2088,6 +2448,8 @@ impl LinkoraContract {
 
     pub fn gov_veto(env: Env, signers: Vec<Address>, pool_id: Symbol, proposal_id: u64) {
         Self::bump_instance(&env);
+        validate_address_list(&env, "signers", &signers);
+        require_with_error!(&env, proposal_id > 0, "proposal id must be positive");
 
         let config_key = StorageKey::GovConfig;
         let config: GovConfig = env
@@ -2139,6 +2501,7 @@ impl LinkoraContract {
     }
 
     pub fn gov_get_proposal(env: Env, proposal_id: u64) -> GovProposal {
+        require_with_error!(&env, proposal_id > 0, "proposal id must be positive");
         let key = StorageKey::GovProposal(proposal_id);
         let proposal: GovProposal = env
             .storage()
@@ -2155,12 +2518,8 @@ impl LinkoraContract {
     pub fn register_oracle(env: Env, admin: Address, name: Symbol, pubkey: BytesN<32>) {
         Self::bump_instance(&env);
         admin.require_auth();
-        let stored_admin: Address = env
-            .storage()
-            .instance()
-            .get(&ADMIN)
-            .expect("not initialized");
-        assert!(admin == stored_admin, "not admin");
+        validate_non_default_address(&env, "admin", &admin);
+        Self::require_role(&env, &admin, Role::Admin);
         let key = StorageKey::OracleKey(name);
         env.storage().persistent().set(&key, &pubkey);
         Self::bump(&env, &key);
@@ -2180,6 +2539,7 @@ impl LinkoraContract {
         window_start: u64,
         window_end: u64,
     ) -> bool {
+        validate_non_default_address(&env, "creator", &creator);
         let oracle_key = StorageKey::OracleKey(oracle_name.clone());
         let pubkey: BytesN<32> = env
             .storage()
@@ -2220,9 +2580,24 @@ impl LinkoraContract {
 
     // ── Upgradability ─────────────────────────────────────────────────────────
 
-    pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) {
+    pub fn upgrade(env: Env, upgrader: Address, new_wasm_hash: BytesN<32>) {
         Self::bump_instance(&env);
-        Self::require_admin(&env);
+        let mut state = Self::get_contract_state(&env);
+        upgrader.require_auth();
+        validate_non_default_address(&env, "upgrader", &upgrader);
+        Self::require_role(&env, &upgrader, Role::Upgrader);
+        require_with_error!(
+            &env,
+            new_wasm_hash != BytesN::default(),
+            "wasm hash must not be empty"
+        );
+        state.version = state
+            .version
+            .checked_add(1)
+            .expect("contract version overflow");
+        state.implementation_wasm_hash = Some(new_wasm_hash.clone());
+        env.storage().instance().set(&CONTRACT_STATE, &state);
+        Self::require_not_paused(&env);
         env.deployer()
             .update_current_contract_wasm(new_wasm_hash.clone());
         ContractUpgraded { new_wasm_hash }.publish(&env);
@@ -2232,8 +2607,10 @@ impl LinkoraContract {
 
     pub fn pay_rent(env: Env, user: Address, token: Address, amount: i128) {
         Self::bump_instance(&env);
-        assert!(amount > 0, "amount must be positive");
         user.require_auth();
+        validate_non_default_address(&env, "user", &user);
+        validate_non_default_address(&env, "token", &token);
+        validate_amount(&env, "rent amount", amount);
 
         let rent_rate_bps = Self::get_rent_rate_bps(env.clone());
         assert!(rent_rate_bps > 0, "rent rate bps must be positive");
@@ -2299,6 +2676,10 @@ impl LinkoraContract {
     ) {
         Self::bump_instance(&env);
         reporter.require_auth();
+        validate_non_default_address(&env, "reporter", &reporter);
+        validate_non_default_address(&env, "token", &token);
+        require_with_error!(&env, post_id > 0, "post id must be positive");
+        validate_amount(&env, "stake amount", stake_amount);
 
         let post_key = StorageKey::Post(post_id);
         let post: Post = env
@@ -2347,6 +2728,7 @@ impl LinkoraContract {
     }
 
     pub fn get_rent_expiry(env: Env, user: Address) -> u32 {
+        validate_non_default_address(&env, "user", &user);
         #[cfg(test)]
         {
             let keys = Self::get_user_keys(&env, &user);
@@ -2382,9 +2764,11 @@ impl LinkoraContract {
         }
     }
 
-    pub fn set_rent_rate_bps(env: Env, rate: u32) {
-        Self::require_admin(&env);
-        assert!(rate > 0, "rate must be positive");
+    pub fn set_rent_rate_bps(env: Env, admin: Address, rate: u32) {
+        admin.require_auth();
+        validate_non_default_address(&env, "admin", &admin);
+        Self::require_role(&env, &admin, Role::Admin);
+        validate_u32_range(&env, "rate", rate, 1, MAX_FEE_BPS);
         env.storage().instance().set(&RENT_RATE_BPS_KEY, &rate);
     }
 
@@ -2395,8 +2779,11 @@ impl LinkoraContract {
             .unwrap_or(100)
     }
 
-    pub fn batch_bump_user_graph(env: Env, user: Address) -> u32 {
-        Self::require_admin(&env);
+    pub fn batch_bump_user_graph(env: Env, admin: Address, user: Address) -> u32 {
+        admin.require_auth();
+        validate_non_default_address(&env, "admin", &admin);
+        Self::require_role(&env, &admin, Role::Admin);
+        validate_non_default_address(&env, "user", &user);
         let keys = Self::get_user_keys(&env, &user);
         let mut bumped = 0;
         for key in keys.iter() {
@@ -2510,13 +2897,20 @@ impl LinkoraContract {
 
     pub fn review_report(
         env: Env,
+        moderator: Address,
         signers: Vec<Address>,
         post_id: u64,
         reporter: Address,
         verdict: ReportStatus,
     ) {
         Self::bump_instance(&env);
-        assert!(verdict != ReportStatus::Pending, "invalid verdict");
+        moderator.require_auth();
+        validate_non_default_address(&env, "moderator", &moderator);
+        Self::require_role(&env, &moderator, Role::Moderator);
+        validate_address_list(&env, "signers", &signers);
+        validate_non_default_address(&env, "reporter", &reporter);
+        validate_report_verdict(&env, &verdict);
+        require_with_error!(&env, post_id > 0, "post id must be positive");
 
         let pool_key = StorageKey::Pool(symbol_short!("mods"));
         let pool: Pool = env
@@ -2704,7 +3098,7 @@ impl LinkoraContract {
                 .publish(&env);
             }
             ReportStatus::Pending => {
-                panic!("invalid verdict");
+                require_with_error!(&env, false, "verdict must be upheld or dismissed");
             }
         }
 
@@ -2714,6 +3108,8 @@ impl LinkoraContract {
     }
 
     pub fn get_report(env: Env, post_id: u64, reporter: Address) -> Option<Report> {
+        validate_non_default_address(&env, "reporter", &reporter);
+        require_with_error!(&env, post_id > 0, "post id must be positive");
         let key = StorageKey::Report(post_id, reporter);
         let result: Option<Report> = env.storage().persistent().get(&key);
         if result.is_some() {
@@ -2723,6 +3119,7 @@ impl LinkoraContract {
     }
 
     pub fn get_report_count(env: Env, post_id: u64) -> u32 {
+        require_with_error!(&env, post_id > 0, "post id must be positive");
         let key = StorageKey::ReportCount(post_id);
         let result = env.storage().persistent().get(&key).unwrap_or(0u32);
         if result > 0 {
@@ -2733,13 +3130,74 @@ impl LinkoraContract {
 
     // ── Internal Helpers ──────────────────────────────────────────────────────
 
-    fn require_admin(env: &Env) {
-        let admin: Address = env
+    fn role_mask(role: Role) -> u32 {
+        match role {
+            Role::Admin => 1 << 0,
+            Role::Moderator => 1 << 1,
+            Role::Pauser => 1 << 2,
+            Role::Upgrader => 1 << 3,
+        }
+    }
+
+    fn get_roles(env: &Env) -> Map<Address, u32> {
+        env.storage()
+            .instance()
+            .get(&ROLES)
+            .unwrap_or_else(|| Map::new(env))
+    }
+
+    fn has_role_internal(env: &Env, account: &Address, role: Role) -> bool {
+        let roles = Self::get_roles(env);
+        let current = roles.get(account.clone()).unwrap_or(0);
+        current & Self::role_mask(role) != 0
+    }
+
+    fn require_role(env: &Env, account: &Address, role: Role) {
+        require_with_error!(
+            env,
+            Self::has_role_internal(env, account, role),
+            format!("{role:?} role required")
+        );
+    }
+
+    // ── Emergency Pause ──────────────────────────────────────────────────────
+
+    pub fn pause(env: Env) {
+        Self::require_role(&env, &env.current_contract_address(), Role::Admin);
+        if Self::is_paused(env.clone()) {
+            panic!("already paused");
+        }
+        env.storage().instance().set(&PAUSED, &true);
+        let admin: Address = env.current_contract_address();
+        PausedEvent { admin }.publish(&env);
+    }
+
+    pub fn unpause(env: Env) {
+        Self::require_role(&env, &env.current_contract_address(), Role::Admin);
+        if !Self::is_paused(env.clone()) {
+            panic!("not paused");
+        }
+        env.storage().instance().set(&PAUSED, &false);
+        let admin: Address = env.current_contract_address();
+        UnpausedEvent { admin }.publish(&env);
+    }
+
+    pub fn is_paused(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get::<Symbol, bool>(&PAUSED)
+            .unwrap_or(false)
+    }
+
+    fn require_not_paused(env: &Env) {
+        if env
             .storage()
             .instance()
-            .get(&ADMIN)
-            .expect("not initialized");
-        admin.require_auth();
+            .get::<Symbol, bool>(&PAUSED)
+            .unwrap_or(false)
+        {
+            panic!("contract is paused");
+        }
     }
 
     /// Extend the TTL of a persistent entry after every write and on every
@@ -2765,6 +3223,52 @@ impl LinkoraContract {
     }
 
     // ── Adjacency-set helpers (ADR-001) ───────────────────────────────────
+
+    fn credential_root_message_hash(env: &Env, root: &BytesN<32>) -> BytesN<32> {
+        let mut data = Bytes::new(env);
+        data.append(&root.to_bytes());
+
+        let ledger = env.ledger().sequence();
+        data.push_back(((ledger >> 24) & 0xff) as u8);
+        data.push_back(((ledger >> 16) & 0xff) as u8);
+        data.push_back(((ledger >> 8) & 0xff) as u8);
+        data.push_back((ledger & 0xff) as u8);
+
+        env.crypto().sha256(&data).into()
+    }
+
+    fn hash_merkle_pair(env: &Env, left: &BytesN<32>, right: &BytesN<32>) -> BytesN<32> {
+        if Self::bytesn_leq(left, right) {
+            Self::hash_ordered_pair(env, left, right)
+        } else {
+            Self::hash_ordered_pair(env, right, left)
+        }
+    }
+
+    fn hash_ordered_pair(env: &Env, left: &BytesN<32>, right: &BytesN<32>) -> BytesN<32> {
+        let mut data = Bytes::new(env);
+        data.append(&left.to_bytes());
+        data.append(&right.to_bytes());
+        env.crypto().sha256(&data).into()
+    }
+
+    fn bytesn_leq(left: &BytesN<32>, right: &BytesN<32>) -> bool {
+        let left_bytes = left.to_bytes();
+        let right_bytes = right.to_bytes();
+
+        for i in 0..32 {
+            let left_byte = left_bytes.get(i).unwrap();
+            let right_byte = right_bytes.get(i).unwrap();
+            if left_byte < right_byte {
+                return true;
+            }
+            if left_byte > right_byte {
+                return false;
+            }
+        }
+
+        true
+    }
 
     /// O(1) swap-remove from a user's index (following or followers side).
     ///

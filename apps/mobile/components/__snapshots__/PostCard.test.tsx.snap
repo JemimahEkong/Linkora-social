@@ -108,16 +108,24 @@ exports[`PostCard Accessibility avatar has minimum 44x44 touch target 1`] = `
         GABCD1...WXYZ
       </Text>
     </View>
-    <Text
+    <View
       style={
         {
-          "color": "#6B7280",
-          "fontSize": 11,
+          "alignItems": "flex-end",
         }
       }
     >
-      1h ago
-    </Text>
+      <Text
+        style={
+          {
+            "color": "#6B7280",
+            "fontSize": 11,
+          }
+        }
+      >
+        1h ago
+      </Text>
+    </View>
   </View>
   <Text
     style={
@@ -141,7 +149,7 @@ exports[`PostCard Accessibility avatar has minimum 44x44 touch target 1`] = `
     }
   >
     <View
-      accessibilityLabel="Like post"
+      accessibilityLabel="Like post, currently 42 likes"
       accessibilityRole="button"
       accessibilityState={
         {
@@ -188,22 +196,63 @@ exports[`PostCard Accessibility avatar has minimum 44x44 touch target 1`] = `
         ]
       }
     >
-      <Text
+      <View
         style={
-          [
-            {
-              "color": "#6B7280",
-              "fontSize": 12,
-              "fontWeight": "700",
-            },
-            false,
-          ]
+          {
+            "alignItems": "center",
+            "flexDirection": "row",
+            "gap": 6,
+          }
         }
       >
-        Like
-         
-        42
-      </Text>
+        <Text
+          style={
+            [
+              {
+                "color": "#6B7280",
+                "fontSize": 16,
+                "lineHeight": 18,
+              },
+              false,
+            ]
+          }
+        >
+          ♡
+        </Text>
+        <View
+          style={
+            [
+              {
+                "alignItems": "center",
+                "backgroundColor": "#F3F4F6",
+                "borderRadius": 999,
+                "justifyContent": "center",
+                "minWidth": 22,
+                "paddingHorizontal": 7,
+                "paddingVertical": 2,
+              },
+              false,
+            ]
+          }
+          testID="like-count-badge"
+        >
+          <Text
+            style={
+              [
+                {
+                  "color": "#6B7280",
+                  "fontSize": 11,
+                  "fontWeight": "700",
+                },
+                false,
+              ]
+            }
+            testID="like-count-text"
+          >
+            42
+          </Text>
+        </View>
+      </View>
     </View>
     <Text
       style={
@@ -214,8 +263,8 @@ exports[`PostCard Accessibility avatar has minimum 44x44 touch target 1`] = `
         }
       }
     >
-      Tips 
-      100
+      💰 
+      100.00
     </Text>
   </View>
 </View>

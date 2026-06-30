@@ -1,5 +1,5 @@
-import { OnboardingFlow } from "@/components/onboarding/OnboardingFlow";
+import { redirect } from "next/navigation";
 
 export default function Home() {
-  return <OnboardingFlow />;
+  redirect("/feed");
 }

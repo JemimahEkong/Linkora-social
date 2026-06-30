@@ -19,6 +19,24 @@ type LinkoraNotificationEvent =
       type: "like";
       user: string;
       post_id: bigint;
+    }
+  | {
+      type: "post_reported";
+      post_id: bigint;
+      reporter_address: string;
+      reason: string;
+    }
+  | {
+      type: "report_dismissed";
+      post_id: bigint;
+      reporter_address: string;
+      moderator_notes?: string;
+    }
+  | {
+      type: "post_removed_by_moderation";
+      post_id: bigint;
+      moderator_address: string;
+      reason: string;
     };
 
 const EVENT_NAMES: Record<string, LinkoraNotificationEvent["type"]> = {
@@ -28,6 +46,12 @@ const EVENT_NAMES: Record<string, LinkoraNotificationEvent["type"]> = {
   Tip: "tip",
   like: "like",
   Like: "like",
+  post_reported: "post_reported",
+  PostReported: "post_reported",
+  report_dismissed: "report_dismissed",
+  ReportDismissed: "report_dismissed",
+  post_removed_by_moderation: "post_removed_by_moderation",
+  PostRemovedByModeration: "post_removed_by_moderation",
 };
 
 function decodeScVal(encoded: string): unknown {
@@ -127,6 +151,27 @@ export function parseNotificationEvent(event: BusEvent): LinkoraNotificationEven
           type,
           user: asString(payload.user),
           post_id: asBigInt(payload.post_id),
+        };
+      case "post_reported":
+        return {
+          type,
+          post_id: asBigInt(payload.post_id),
+          reporter_address: asString(payload.reporter_address ?? payload.reporter),
+          reason: asString(payload.reason),
+        };
+      case "report_dismissed":
+        return {
+          type,
+          post_id: asBigInt(payload.post_id),
+          reporter_address: asString(payload.reporter_address ?? payload.reporter),
+          moderator_notes: asString(payload.moderator_notes) || undefined,
+        };
+      case "post_removed_by_moderation":
+        return {
+          type,
+          post_id: asBigInt(payload.post_id),
+          moderator_address: asString(payload.moderator_address ?? payload.moderator),
+          reason: asString(payload.reason),
         };
       default:
         return null;
@@ -259,6 +304,74 @@ export async function dispatchNotificationForBusEvent(
         await markDispatched(pool, event, "like", recipient);
       }
       return likeResult;
+    }
+    case "post_reported": {
+      const recipient = await getPostAuthor(pool, parsed.post_id);
+      if (!recipient) {
+        return false;
+      }
+
+      if (await isAlreadyDispatched(pool, event, "post_reported", recipient)) {
+        return false;
+      }
+      const reportResult = await notificationService.dispatchEventNotification({
+        type: "POST_REPORTED",
+        recipient,
+        payload: {
+          postId: parsed.post_id.toString(),
+          reporterAddress: parsed.reporter_address,
+          reason: parsed.reason,
+          deepLink: `linkora://post/${parsed.post_id.toString()}`,
+        },
+      });
+      if (reportResult) {
+        await markDispatched(pool, event, "post_reported", recipient);
+      }
+      return reportResult;
+    }
+    case "report_dismissed": {
+      if (await isAlreadyDispatched(pool, event, "report_dismissed", parsed.reporter_address)) {
+        return false;
+      }
+      const dismissResult = await notificationService.dispatchEventNotification({
+        type: "REPORT_DISMISSED",
+        recipient: parsed.reporter_address,
+        payload: {
+          postId: parsed.post_id.toString(),
+          moderatorNotes: parsed.moderator_notes,
+          deepLink: `linkora://post/${parsed.post_id.toString()}`,
+        },
+      });
+      if (dismissResult) {
+        await markDispatched(pool, event, "report_dismissed", parsed.reporter_address);
+      }
+      return dismissResult;
+    }
+    case "post_removed_by_moderation": {
+      // Notify all reporters who had pending reports for this post
+      // For simplicity, we'll notify the post author about the removal
+      const recipient = await getPostAuthor(pool, parsed.post_id);
+      if (!recipient) {
+        return false;
+      }
+
+      if (await isAlreadyDispatched(pool, event, "post_removed_by_moderation", recipient)) {
+        return false;
+      }
+      const removalResult = await notificationService.dispatchEventNotification({
+        type: "POST_REMOVED_BY_MODERATION",
+        recipient,
+        payload: {
+          postId: parsed.post_id.toString(),
+          moderatorAddress: parsed.moderator_address,
+          reason: parsed.reason,
+          deepLink: `linkora://post/${parsed.post_id.toString()}`,
+        },
+      });
+      if (removalResult) {
+        await markDispatched(pool, event, "post_removed_by_moderation", recipient);
+      }
+      return removalResult;
     }
     default:
       return false;

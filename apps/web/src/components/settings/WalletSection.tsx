@@ -4,7 +4,7 @@ import { useWallet } from "@/hooks/useWallet";
 import { useRouter } from "next/navigation";
 
 export function WalletSection() {
-  const { address, network, disconnect } = useWallet();
+  const { address, network, disconnect, connect } = useWallet();
   const router = useRouter();
 
   function handleDisconnect() {
@@ -35,7 +35,7 @@ export function WalletSection() {
             <button
               onClick={() => address && navigator.clipboard.writeText(address)}
               className="px-3 py-2 text-sm text-gray-600 hover:text-gray-800 border border-gray-200 rounded-lg hover:bg-gray-50"
-              title="Copy full address"
+              aria-label="Copy wallet address to clipboard"
             >
               Copy
             </button>
@@ -51,13 +51,19 @@ export function WalletSection() {
           </div>
         </div>
 
-        {/* Disconnect Button */}
-        <div className="pt-2">
+        {/* Disconnect & Switch Buttons */}
+        <div className="pt-2 flex gap-3">
           <button
             onClick={handleDisconnect}
             className="px-4 py-2 bg-gray-100 text-gray-700 text-sm font-medium rounded-lg hover:bg-gray-200 border border-gray-300"
           >
             Disconnect Wallet
+          </button>
+          <button
+            onClick={connect}
+            className="px-4 py-2 bg-violet-600 text-white text-sm font-medium rounded-lg hover:bg-violet-700 border border-violet-700"
+          >
+            Switch Account
           </button>
         </div>
       </div>

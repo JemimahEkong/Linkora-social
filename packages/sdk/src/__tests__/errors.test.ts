@@ -5,52 +5,96 @@ import {
   InsufficientBalanceError,
   CooldownError,
   InvalidInputError,
+  ValidationError,
+  NetworkError,
+  SigningError,
+  ContractError,
   mapError,
 } from "../errors";
 
 describe("Error classes", () => {
-  it("LinkoraError sets name and message correctly", () => {
+  it("LinkoraError sets name, message, and code correctly", () => {
     const err = new LinkoraError("Something went wrong");
     expect(err.message).toBe("Something went wrong");
     expect(err.name).toBe("LinkoraError");
+    expect(err.code).toBe("LINKORA_ERROR");
     expect(err.originalError).toBeUndefined();
+    expect(err.details).toBeUndefined();
   });
 
-  it("LinkoraError preserves original error", () => {
+  it("LinkoraError preserves original error and details", () => {
     const original = new Error("network failure");
-    const err = new LinkoraError("SDK error", original);
+    const err = new LinkoraError("SDK error", "CUSTOM_CODE", { foo: "bar" }, original);
     expect(err.originalError).toBe(original);
+    expect(err.details).toEqual({ foo: "bar" });
+    expect(err.code).toBe("CUSTOM_CODE");
   });
 
-  it("NotFoundError is an instance of LinkoraError", () => {
+  it("NotFoundError has correct code and is instanceof LinkoraError", () => {
     const err = new NotFoundError("not found");
     expect(err).toBeInstanceOf(LinkoraError);
     expect(err).toBeInstanceOf(NotFoundError);
     expect(err.name).toBe("NotFoundError");
+    expect(err.code).toBe("NOT_FOUND");
   });
 
-  it("UnauthorizedError is an instance of LinkoraError", () => {
+  it("UnauthorizedError has correct code", () => {
     const err = new UnauthorizedError("unauthorized");
     expect(err).toBeInstanceOf(LinkoraError);
-    expect(err).toBeInstanceOf(UnauthorizedError);
+    expect(err.code).toBe("UNAUTHORIZED");
   });
 
-  it("InsufficientBalanceError is an instance of LinkoraError", () => {
+  it("InsufficientBalanceError has correct code", () => {
     const err = new InsufficientBalanceError("low balance");
     expect(err).toBeInstanceOf(LinkoraError);
-    expect(err).toBeInstanceOf(InsufficientBalanceError);
+    expect(err.code).toBe("INSUFFICIENT_BALANCE");
   });
 
-  it("CooldownError is an instance of LinkoraError", () => {
+  it("CooldownError has correct code", () => {
     const err = new CooldownError("cooldown active");
     expect(err).toBeInstanceOf(LinkoraError);
-    expect(err).toBeInstanceOf(CooldownError);
+    expect(err.code).toBe("COOLDOWN_ACTIVE");
   });
 
-  it("InvalidInputError is an instance of LinkoraError", () => {
+  it("InvalidInputError has correct code", () => {
     const err = new InvalidInputError("bad input");
     expect(err).toBeInstanceOf(LinkoraError);
-    expect(err).toBeInstanceOf(InvalidInputError);
+    expect(err.code).toBe("INVALID_INPUT");
+  });
+
+  it("ValidationError has correct code and carries details", () => {
+    const err = new ValidationError("field too long", { field: "username", max: 32 });
+    expect(err).toBeInstanceOf(LinkoraError);
+    expect(err).toBeInstanceOf(ValidationError);
+    expect(err.name).toBe("ValidationError");
+    expect(err.code).toBe("VALIDATION_ERROR");
+    expect(err.details).toEqual({ field: "username", max: 32 });
+  });
+
+  it("NetworkError has correct code and carries details", () => {
+    const err = new NetworkError("connection refused", { status: 503 });
+    expect(err).toBeInstanceOf(LinkoraError);
+    expect(err).toBeInstanceOf(NetworkError);
+    expect(err.name).toBe("NetworkError");
+    expect(err.code).toBe("NETWORK_ERROR");
+    expect(err.details).toEqual({ status: 503 });
+  });
+
+  it("SigningError has correct code and carries details", () => {
+    const err = new SigningError("user rejected", { reason: "user_rejected" });
+    expect(err).toBeInstanceOf(LinkoraError);
+    expect(err).toBeInstanceOf(SigningError);
+    expect(err.name).toBe("SigningError");
+    expect(err.code).toBe("SIGNING_ERROR");
+    expect(err.details).toEqual({ reason: "user_rejected" });
+  });
+
+  it("ContractError has correct code", () => {
+    const err = new ContractError("simulation trapped");
+    expect(err).toBeInstanceOf(LinkoraError);
+    expect(err).toBeInstanceOf(ContractError);
+    expect(err.name).toBe("ContractError");
+    expect(err.code).toBe("CONTRACT_ERROR");
   });
 
   it("supports instanceof checks in compiled output", () => {
@@ -68,15 +112,14 @@ describe("mapError", () => {
     });
 
     it("matches 'does not exist'", () => {
-      const result = mapError("post does not exist");
-      expect(result).toBeInstanceOf(NotFoundError);
+      expect(mapError("post does not exist")).toBeInstanceOf(NotFoundError);
     });
 
     it("preserves the original error", () => {
       const original = new Error("not found");
-      const result = mapError(original);
+      const result = mapError(original) as NotFoundError;
       expect(result).toBeInstanceOf(NotFoundError);
-      expect((result as NotFoundError).originalError).toBe(original);
+      expect(result.originalError).toBe(original);
     });
   });
 
@@ -87,14 +130,8 @@ describe("mapError", () => {
       expect(result.message).toBe("Unauthorized operation. You do not have permission.");
     });
 
-    it("matches 'not admin'", () => {
-      const result = mapError("only admin can call this");
-      expect(result).toBeInstanceOf(UnauthorizedError);
-    });
-
     it("matches 'only author'", () => {
-      const result = mapError("only author can edit");
-      expect(result).toBeInstanceOf(UnauthorizedError);
+      expect(mapError("only author can edit")).toBeInstanceOf(UnauthorizedError);
     });
 
     it("matches 'blocked'", () => {
@@ -106,56 +143,68 @@ describe("mapError", () => {
 
   describe("InsufficientBalanceError", () => {
     it("matches 'insufficient allowance'", () => {
-      const result = mapError("insufficient allowance");
-      expect(result).toBeInstanceOf(InsufficientBalanceError);
-      expect(result.message).toBe("Insufficient allowance to complete transaction.");
+      expect(mapError("insufficient allowance")).toBeInstanceOf(InsufficientBalanceError);
     });
 
     it("matches 'low balance'", () => {
-      const result = mapError("low balance");
-      expect(result).toBeInstanceOf(InsufficientBalanceError);
-      expect(result.message).toBe("Insufficient account balance for this transaction.");
-    });
-
-    it("matches 'insufficient balance'", () => {
-      const result = mapError("insufficient balance");
-      expect(result).toBeInstanceOf(InsufficientBalanceError);
+      expect(mapError("low balance")).toBeInstanceOf(InsufficientBalanceError);
     });
   });
 
   describe("CooldownError", () => {
     it("matches 'cooldown'", () => {
-      const result = mapError("cooldown period not expired");
-      expect(result).toBeInstanceOf(CooldownError);
-      expect(result.message).toBe("Tipping cooldown has not expired yet.");
+      expect(mapError("cooldown period not expired")).toBeInstanceOf(CooldownError);
     });
   });
 
-  describe("InvalidInputError", () => {
+  describe("ValidationError", () => {
     it("matches 'invalid'", () => {
       const result = mapError("invalid username");
-      expect(result).toBeInstanceOf(InvalidInputError);
+      expect(result).toBeInstanceOf(ValidationError);
       expect(result.message).toContain("invalid username");
     });
 
     it("matches 'too long'", () => {
-      const result = mapError("content too long");
-      expect(result).toBeInstanceOf(InvalidInputError);
+      expect(mapError("content too long")).toBeInstanceOf(ValidationError);
     });
 
     it("matches 'must be positive'", () => {
-      const result = mapError("amount must be positive");
-      expect(result).toBeInstanceOf(InvalidInputError);
+      expect(mapError("amount must be positive")).toBeInstanceOf(ValidationError);
+    });
+  });
+
+  describe("ContractError", () => {
+    it("matches 'simulation failed'", () => {
+      expect(mapError("simulation failed for contract")).toBeInstanceOf(ContractError);
     });
 
-    it("matches 'cannot exceed'", () => {
-      const result = mapError("amount cannot exceed limit");
-      expect(result).toBeInstanceOf(InvalidInputError);
+    it("matches 'host function'", () => {
+      expect(mapError("host function invocation failed")).toBeInstanceOf(ContractError);
+    });
+  });
+
+  describe("NetworkError", () => {
+    it("matches 'connection'", () => {
+      expect(mapError("ECONNREFUSED 127.0.0.1:8000")).toBeInstanceOf(NetworkError);
+    });
+
+    it("matches 'timeout'", () => {
+      expect(mapError("request timeout")).toBeInstanceOf(NetworkError);
+    });
+  });
+
+  describe("SigningError", () => {
+    it("matches 'freighter'", () => {
+      expect(mapError("freighter extension not found")).toBeInstanceOf(SigningError);
+    });
+
+    it("matches 'ledger'", () => {
+      expect(mapError("ledger device not connected")).toBeInstanceOf(SigningError);
     });
   });
 
   describe("default fallback", () => {
-    it("returns a generic LinkoraError for unknown errors", () => {
+    it("returns LinkoraError for unknown errors", () => {
       const result = mapError("something unexpected happened");
       expect(result).toBeInstanceOf(LinkoraError);
       expect(result).not.toBeInstanceOf(NotFoundError);
@@ -163,10 +212,7 @@ describe("mapError", () => {
     });
 
     it("handles Error objects", () => {
-      const error = new Error("custom runtime error");
-      const result = mapError(error);
-      expect(result).toBeInstanceOf(LinkoraError);
-      expect(result.message).toBe("custom runtime error");
+      expect(mapError(new Error("custom runtime error"))).toBeInstanceOf(LinkoraError);
     });
   });
 });

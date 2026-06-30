@@ -1,4 +1,5 @@
 /**
+/**
  * Linkora Indexer — entry point.
  *
  * Connects to a Soroban RPC endpoint and streams Linkora contract events
@@ -18,13 +19,10 @@
  *   MIN_POLL_INTERVAL_MS    - (optional) adaptive poll floor, default 100
  *   MAX_POLL_INTERVAL_MS    - (optional) adaptive poll ceiling, default 5000
  */
-/**
- * Linkora Indexer — entry point.
- */
 
 import http from "http";
 import { Pool } from "pg";
-import { streamEvents, RawEvent, BatchProcessor } from "./stream";
+import { streamEvents, backfillStartupGap, RawEvent, BatchProcessor } from "./stream";
 import { IngestPipeline, IngestEvent } from "./pipeline";
 import { bus } from "./bus";
 import { attachWebSocketServer } from "./ws";
@@ -34,6 +32,7 @@ import { NotificationService, PostgresDeviceTokenStore } from "./notifications/s
 import { createApp } from "./api";
 import { createDomainProcessor } from "./domain-processor";
 import { PostgresDatabase } from "./postgres-db";
+import { ScoreRefreshService } from "./score-refresh";
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
@@ -53,13 +52,19 @@ const STELLAR_RPC_URL = requireEnv("STELLAR_RPC_URL");
 const CONTRACT_ID = requireEnv("CONTRACT_ID");
 const START_LEDGER = parseInt(requireEnv("START_LEDGER"), 10);
 const PORT = parseInt(process.env.PORT ?? "3000", 10);
+const SCORE_REFRESH_INTERVAL_MINUTES = parseInt(
+  process.env.SCORE_REFRESH_INTERVAL_MINUTES ?? "5",
+  10
+);
 
 // ── Database ──────────────────────────────────────────────────────────────────
 
 const pgPool = new Pool({ connectionString: DATABASE_URL });
 const notificationService = new NotificationService({
   deviceTokenStore: new PostgresDeviceTokenStore(pgPool),
+  pool: pgPool,
 });
+const scoreRefreshService = new ScoreRefreshService(pgPool, SCORE_REFRESH_INTERVAL_MINUTES);
 
 /**
  * Idempotently ensure the staging table and cursor exist. Mirrors
@@ -80,7 +85,7 @@ async function ensureSchema(): Promise<void> {
     )
   `);
   await pgPool.query(`
-    CREATE TABLE IF NOT EXISTS indexer_state (
+    CREATE TABLE IF NOT EXISTS indexer_cursor (
       id               TEXT        PRIMARY KEY,
       processed_cursor BIGINT      NOT NULL DEFAULT 0,
       updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -124,6 +129,40 @@ async function ensureSchema(): Promise<void> {
     CREATE INDEX IF NOT EXISTS idx_sent_notifications_recipient
       ON sent_notifications (recipient, dispatched_at DESC)
   `);
+
+  await pgPool.query(`
+    CREATE TABLE IF NOT EXISTS blocks (
+      blocker TEXT NOT NULL,
+      blocked TEXT NOT NULL,
+      PRIMARY KEY (blocker, blocked)
+    )
+  `);
+  await pgPool.query(`
+    CREATE INDEX IF NOT EXISTS idx_blocks_blocker ON blocks (blocker)
+  `);
+  await pgPool.query(`
+    CREATE INDEX IF NOT EXISTS idx_blocks_blocked ON blocks (blocked)
+  `);
+  await pgPool.query(`
+    CREATE TABLE IF NOT EXISTS dm_keys (
+      address       TEXT PRIMARY KEY,
+      x25519_pubkey TEXT NOT NULL,
+      updated_at    TIMESTAMP NOT NULL DEFAULT NOW()
+    )
+  `);
+  await pgPool.query(`
+    CREATE TABLE IF NOT EXISTS notification_preferences (
+      address              TEXT PRIMARY KEY,
+      browser_push_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+      new_followers        BOOLEAN NOT NULL DEFAULT TRUE,
+      new_likes            BOOLEAN NOT NULL DEFAULT TRUE,
+      new_comments         BOOLEAN NOT NULL DEFAULT TRUE,
+      direct_messages      BOOLEAN NOT NULL DEFAULT TRUE,
+      pool_activity        BOOLEAN NOT NULL DEFAULT TRUE,
+      governance_updates   BOOLEAN NOT NULL DEFAULT TRUE,
+      updated_at           TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
 }
 
 // ── Event normalisation ─────────────────────────────────────────────────────
@@ -163,6 +202,7 @@ async function shutdown(signal: string): Promise<void> {
   shuttingDown = true;
   console.log(`[indexer] Received ${signal}, shutting down…`);
   abortController.abort();
+  scoreRefreshService.stop();
   detachNotificationDispatcher();
   await wsHandle.close();
   httpServer.close();
@@ -186,7 +226,11 @@ async function main(): Promise<void> {
   const pipeline = new IngestPipeline(pgPool, {
     streamId: CONTRACT_ID,
     bus,
-    domainProcessor: createDomainProcessor(pgPool, notificationService),
+    domainProcessor: createDomainProcessor(
+      pgPool,
+      notificationService,
+      new PostgresDatabase(pgPool)
+    ),
   });
 
   const processBatch: BatchProcessor = async (events) => {
@@ -197,9 +241,43 @@ async function main(): Promise<void> {
   // Resume gap detection from the last committed cursor.
   const initialCursor = await pipeline.readCursor();
 
+  // ── Startup gap detection ─────────────────────────────────────────────────
+  // If the indexer was down, fetch the current ledger from RPC and backfill
+  // any ledgers between processed_cursor and current before streaming live.
+  if (initialCursor > 0) {
+    try {
+      const rpcRes = await fetch(STELLAR_RPC_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "getLatestLedger", params: {} }),
+      });
+      if (rpcRes.ok) {
+        const rpcJson = (await rpcRes.json()) as { result?: { sequence: number } };
+        const currentLedger = rpcJson.result?.sequence ?? 0;
+        if (currentLedger > initialCursor + 1) {
+          console.log(
+            `[indexer] Startup gap detected: processed=${initialCursor}, current=${currentLedger}. Backfilling…`
+          );
+          await backfillStartupGap(
+            { rpcUrl: STELLAR_RPC_URL, contractId: CONTRACT_ID },
+            initialCursor + 1,
+            currentLedger,
+            processBatch,
+            abortController.signal
+          );
+        }
+      }
+    } catch (err) {
+      console.warn("[indexer] Startup gap check failed (continuing):", err);
+    }
+  }
+
   httpServer.listen(PORT, () => {
     console.log(`[indexer] HTTP + WS listening on :${PORT} (ws path /ws)`);
   });
+
+  // Start score refresh service
+  scoreRefreshService.start();
 
   // Start gossip in the background.
   startGossip(pgPool, abortController.signal).catch((err) =>

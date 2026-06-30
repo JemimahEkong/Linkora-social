@@ -15,6 +15,7 @@ import {
   getConnectionState,
   deleteConnectionState,
 } from "../utils/secureStorage";
+import { deregisterTokenFromIndexer } from "../notifications/registerForPushNotifications";
 import { useNetworkContext, type NetworkPreset, type StellarNetworkId } from "./NetworkContext";
 
 // ---------------------------------------------------------------------------
@@ -386,17 +387,21 @@ export function WalletProvider({ children }: { children: ReactNode }): JSX.Eleme
   );
 
   const disconnect = useCallback(async () => {
+    const currentAddress = wallet.address;
     try {
       setError(null);
       if (walletKit) await walletKit.disconnect();
     } catch {
       // ignore
     } finally {
+      if (currentAddress) {
+        void deregisterTokenFromIndexer(currentAddress);
+      }
       await Promise.all([deleteWalletAddress(), deleteConnectionState()]);
       setWallet({ address: null, network: null, provider: null });
       setState("disconnected");
     }
-  }, [walletKit]);
+  }, [walletKit, wallet.address]);
 
   const refresh = useCallback(async () => {
     await checkConnectionState();

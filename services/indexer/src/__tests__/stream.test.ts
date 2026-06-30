@@ -6,7 +6,7 @@
  * exponential backoff and that no events are dropped.
  */
 
-import { streamEvents, RawEvent, parseEventIndex, RpcError } from "../stream";
+import { streamEvents, backfillStartupGap, RawEvent, parseEventIndex, RpcError } from "../stream";
 import { TokenBucket } from "../ratelimit";
 
 interface FakeResponse {
@@ -152,5 +152,67 @@ describe("RpcError", () => {
     const err = new RpcError("boom", 429);
     expect(err.status).toBe(429);
     expect(err.name).toBe("RpcError");
+  });
+});
+
+describe("backfillStartupGap — 100-ledger gap recovery", () => {
+  it("fetches and delivers all events across a 100-ledger gap", async () => {
+    // 100 ledgers (1001–1100), one event per ledger
+    const gapEvents: Array<Partial<RawEvent>> = Array.from({ length: 100 }, (_, i) => ({
+      type: "contract",
+      ledger: 1001 + i,
+      ledgerClosedAt: "2026-06-22T00:00:00Z",
+      contractId: "C1",
+      id: `00000000${1001 + i}-0000000000`,
+      pagingToken: `tok-${1001 + i}`,
+      topic: ["PostCreated"],
+      value: "v",
+      txHash: `tx-${i}`,
+    }));
+
+    let fetchCalls = 0;
+    const fetchImpl = (async (_url: string, opts: RequestInit) => {
+      fetchCalls++;
+      const body = JSON.parse(opts.body as string) as { params?: { startLedger?: number; pagination?: { cursor?: string } } };
+      const startLedger = body.params?.startLedger ?? 0;
+      // Return events for the requested range (max 100 per page)
+      const page = gapEvents.filter((e) => e.ledger! >= startLedger);
+      return {
+        ok: true,
+        status: 200,
+        statusText: "OK",
+        json: async () => ({ result: { events: page, latestLedger: 1200 } }),
+      };
+    }) as unknown as typeof fetch;
+
+    const recovered: RawEvent[] = [];
+    const processBatch = async (events: RawEvent[]): Promise<number> => {
+      recovered.push(...events);
+      return events[events.length - 1].ledger;
+    };
+
+    await backfillStartupGap(
+      {
+        rpcUrl: "http://rpc",
+        contractId: "C1",
+        maxRetries: 3,
+        backoffBaseMs: 1,
+        backoffMaxMs: 10,
+      },
+      1001,
+      1100,
+      processBatch,
+      new AbortController().signal, // separate signal so backfill runs to completion
+      { fetchImpl, sleep: async () => {}, rateLimiter: nonBlockingLimiter() }
+    );
+
+    // All 100 ledgers must be recovered
+    expect(recovered).toHaveLength(100);
+    expect(recovered[0].ledger).toBe(1001);
+    expect(recovered[99].ledger).toBe(1100);
+    // No duplicates
+    const ledgers = recovered.map((e) => e.ledger);
+    expect(new Set(ledgers).size).toBe(100);
+    expect(fetchCalls).toBeGreaterThan(0);
   });
 });

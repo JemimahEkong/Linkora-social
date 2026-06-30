@@ -88,6 +88,7 @@ test.describe("Creator Token Wizard", () => {
     await page.addInitScript((addr) => {
       localStorage.setItem("linkora_wallet_address", addr);
       localStorage.setItem("linkora_wallet_network", "TESTNET");
+      localStorage.setItem(`linkora:creator_token:${addr}`, "CTOKEN_ALREADY_SET");
     }, WALLET_ADDRESS);
 
     await page.goto("/onboarding/creator");
@@ -124,7 +125,7 @@ test.describe("Creator Token Wizard", () => {
 
     // Step 2 should now be visible.
     await expect(page.getByTestId("step-review-fees")).toBeVisible();
-    await expect(page.getByText("Review fees")).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Review fees" })).toBeVisible();
   });
 
   test("step 2: shows token summary and fee estimate", async ({ page }) => {

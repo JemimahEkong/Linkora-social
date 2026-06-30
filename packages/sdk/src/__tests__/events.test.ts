@@ -36,7 +36,12 @@ jest.mock("@stellar/stellar-sdk", () => ({
 
 import { parseContractEvent, SorobanEvent, FollowEvent, LinkoraEvent } from "../events/types";
 import { LinkoraEventSubscriber, LinkoraEventSubscriberConfig } from "../events/subscriber";
-import { MemoryCursorStore, LocalStorageCursorStore, FileCursorStore } from "../events/cursor";
+import {
+  MemoryCursorStore,
+  LocalStorageCursorStore,
+  FileCursorStore,
+  SecureStoreCursorStore,
+} from "../events/cursor";
 
 // ---------------------------------------------------------------------------
 // Fixtures helpers
@@ -272,6 +277,95 @@ describe("parseContractEvent", () => {
     expect(evt.action).toBe("pause");
   });
 
+  it("decodes analytics and moderation events added after the initial subscriber", () => {
+    const attestation = parseContractEvent(
+      rawEvent({
+        topics: [enc("AttestationVerifiedEvent")],
+        data: enc({
+          oracle_name: "oracle",
+          report_hash: "hash",
+          creator: "GCREATOR",
+          window_start: 10,
+          window_end: 20,
+        }),
+      })
+    ) as Extract<LinkoraEvent, { type: "attestation_verified" }>;
+
+    const report = parseContractEvent(
+      rawEvent({
+        topics: [enc("PostReportedEvent")],
+        data: enc({ post_id: 12, reporter: "GREPORTER", stake_amount: "7000000" }),
+      })
+    ) as Extract<LinkoraEvent, { type: "post_reported" }>;
+
+    expect(attestation.type).toBe("attestation_verified");
+    expect(attestation.oracle_name).toBe("oracle");
+    expect(attestation.window_end).toBe(20);
+    expect(report.type).toBe("post_reported");
+    expect(report.stake_amount).toBe(7000000n);
+  });
+
+  it("recognizes every current contract event discriminator", () => {
+    const fixtures: Array<[string, Record<string, unknown>]> = [
+      [
+        "RentPaidEvent",
+        { user: "GU", payer: "GP", token: "GT", amount: "1", extended_to_ledger: 2 },
+      ],
+      ["ProfileSetEvent", { user: "GU", username: "alice" }],
+      ["FollowEvent", { follower: "GA", followee: "GB" }],
+      ["UnfollowEvent", { follower: "GA", followee: "GB" }],
+      ["BlockEvent", { blocker: "GA", blocked: "GB" }],
+      ["UnblockEvent", { blocker: "GA", blocked: "GB" }],
+      ["PostCreatedEvent", { id: 1, author: "GA" }],
+      ["TipEvent", { tipper: "GA", post_id: 1, amount: "2", fee: "1" }],
+      ["PoolDepositEvent", { depositor: "GA", pool_id: "pool", amount: "3" }],
+      ["PoolWithdrawEvent", { recipient: "GA", pool_id: "pool", amount: "3" }],
+      ["PoolCreatedEvent", { pool_id: "pool", token: "GT", admins: ["GA"], threshold: 1 }],
+      ["LikePostEvent", { user: "GA", post_id: 1 }],
+      ["ContractUpgraded", { new_wasm_hash: "hash" }],
+      ["PostDeleted", { post_id: 1, author: "GA" }],
+      [
+        "ProposalCreatedEvent",
+        { pool_id: "pool", proposal_id: 1, proposer: "GA", amount: "4", recipient: "GB" },
+      ],
+      ["ProposalSignedEvent", { pool_id: "pool", proposal_id: 1, signer: "GA" }],
+      ["ProposalExecutedEvent", { pool_id: "pool", proposal_id: 1, amount: "4", recipient: "GB" }],
+      ["PoolAdminAddedEvent", { pool_id: "pool", new_admin: "GA" }],
+      ["PoolAdminRemovedEvent", { pool_id: "pool", admin: "GA" }],
+      ["PoolThresholdUpdatedEvent", { pool_id: "pool", old_threshold: 1, new_threshold: 2 }],
+      ["DmKeyPublishedEvent", { user: "GA", public_key: "PUB" }],
+      ["CredentialRootUpdatedEvent", { user: "GA", root: "ROOT" }],
+      ["CredentialVerifiedEvent", { user: "GA", nullifier: "NULL" }],
+      ["FeeUpdatedEvent", { name: "fee", old_fee_bps: 1, new_fee_bps: 2 }],
+      ["TreasuryUpdatedEvent", { name: "treasury", old_treasury: "GA", new_treasury: "GB" }],
+      [
+        "GovProposalCreatedEvent",
+        { proposal_id: 1, proposer: "GA", parameter: "FeeBps", new_value: 2 },
+      ],
+      ["GovVoteEvent", { proposal_id: 1, voter: "GA", support: true }],
+      ["GovProposalExecutedEvent", { proposal_id: 1, parameter: "FeeBps", new_value: 2 }],
+      ["GovProposalVetoedEvent", { proposal_id: 1 }],
+      ["EmergencyBypassEvent", { action: "pause" }],
+      [
+        "AttestationVerifiedEvent",
+        {
+          oracle_name: "oracle",
+          report_hash: "hash",
+          creator: "GA",
+          window_start: 1,
+          window_end: 2,
+        },
+      ],
+      ["PostReportedEvent", { post_id: 1, reporter: "GA", stake_amount: "5" }],
+      ["PostRemovedByModerationEvent", { post_id: 1, reporter: "GA" }],
+      ["ReportDismissedEvent", { post_id: 1, reporter: "GA" }],
+    ];
+
+    for (const [name, data] of fixtures) {
+      expect(parseContractEvent(rawEvent({ topics: [enc(name)], data: enc(data) }))).not.toBeNull();
+    }
+  });
+
   // ── Acceptance criterion: null for unknown / malformed events ────────────
 
   it("returns null for an unknown event type without throwing", () => {
@@ -478,6 +572,66 @@ describe("LinkoraEventSubscriber", () => {
     expect(followHandler).toHaveBeenCalledTimes(1);
     expect(tipHandler).toHaveBeenCalledTimes(1);
   });
+
+  it("dispatches governance, analytics, moderation, and DM handlers", async () => {
+    const events = [
+      rawEvent({
+        id: "gov-proposal",
+        pagingToken: "c1",
+        topics: [enc("GovProposalCreatedEvent")],
+        data: enc({ proposal_id: 1, proposer: "GP", parameter: "FeeBps", new_value: 100 }),
+      }),
+      rawEvent({
+        id: "gov-vote",
+        pagingToken: "c2",
+        topics: [enc("GovVoteEvent")],
+        data: enc({ proposal_id: 1, voter: "GV", support: true }),
+      }),
+      rawEvent({
+        id: "attestation",
+        pagingToken: "c3",
+        topics: [enc("AttestationVerifiedEvent")],
+        data: enc({
+          oracle_name: "oracle",
+          report_hash: "hash",
+          creator: "GC",
+          window_start: 1,
+          window_end: 2,
+        }),
+      }),
+      rawEvent({
+        id: "reported",
+        pagingToken: "c4",
+        topics: [enc("PostReportedEvent")],
+        data: enc({ post_id: 2, reporter: "GR", stake_amount: "10" }),
+      }),
+      rawEvent({
+        id: "dm-key",
+        pagingToken: "c5",
+        topics: [enc("DmKeyPublishedEvent")],
+        data: enc({ user: "GD", public_key: "PUB" }),
+      }),
+    ];
+    globalThis.fetch = rpcResponses([events]) as unknown as typeof fetch;
+
+    const sub = makeSub();
+    const handlers = {
+      gov_proposal_created: jest.fn(),
+      gov_vote: jest.fn(),
+      attestation_verified: jest.fn(),
+      post_reported: jest.fn(),
+      dm_key_published: jest.fn(),
+    };
+    sub.subscribe(handlers);
+
+    await driveCycles(sub, 1);
+
+    expect(handlers.gov_proposal_created).toHaveBeenCalledTimes(1);
+    expect(handlers.gov_vote).toHaveBeenCalledTimes(1);
+    expect(handlers.attestation_verified).toHaveBeenCalledTimes(1);
+    expect(handlers.post_reported).toHaveBeenCalledTimes(1);
+    expect(handlers.dm_key_published).toHaveBeenCalledTimes(1);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -654,6 +808,52 @@ describe("Reconnection with backoff after RPC errors", () => {
     priv(sub).updatePollInterval(2);
     expect(priv(sub).pollIntervalMs).toBe(100);
   });
+
+  it("reconnects with exponential backoff after a WebSocket closes", async () => {
+    type TestSocket = {
+      onopen: (() => void) | null;
+      onmessage: ((event: { data: unknown }) => void) | null;
+      onclose: (() => void) | null;
+      onerror: (() => void) | null;
+      send: jest.Mock;
+      close: jest.Mock;
+    };
+    const sockets: TestSocket[] = [];
+    const factory = jest.fn(() => {
+      const socket: TestSocket = {
+        onopen: null,
+        onmessage: null,
+        onclose: null,
+        onerror: null,
+        send: jest.fn(),
+        close: jest.fn(() => {
+          setTimeout(() => (socket.onclose as (() => void) | null)?.(), 0);
+        }),
+      };
+      sockets.push(socket);
+      setTimeout(() => {
+        (socket.onopen as (() => void) | null)?.();
+        (socket.onclose as (() => void) | null)?.();
+      }, 0);
+      return socket;
+    });
+
+    const sub = makeSub({
+      webSocketUrl: "wss://events.example.test",
+      webSocketFactory: factory,
+      minPollIntervalMs: 1,
+      maxPollIntervalMs: 4,
+    });
+
+    await sub.start();
+    for (let i = 0; i < 20 && factory.mock.calls.length < 2; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    await sub.stop();
+
+    expect(factory.mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(sockets[0].send).toHaveBeenCalledWith(expect.stringContaining("subscribe"));
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -727,6 +927,27 @@ describe("CursorStore backends", () => {
     it("clear() removes the key", async () => {
       const store = new LocalStorageCursorStore("tk");
       await store.set("lc-cursor");
+      await store.clear();
+      expect(await store.get()).toBeUndefined();
+    });
+  });
+
+  describe("SecureStoreCursorStore", () => {
+    it("persists cursor through a SecureStore adapter", async () => {
+      const values: Record<string, string> = {};
+      const secureStore = {
+        getItemAsync: jest.fn(async (key: string) => values[key] ?? null),
+        setItemAsync: jest.fn(async (key: string, value: string) => {
+          values[key] = value;
+        }),
+        deleteItemAsync: jest.fn(async (key: string) => {
+          delete values[key];
+        }),
+      };
+      const store = new SecureStoreCursorStore(secureStore, "secure-key");
+
+      await store.set("secure-cursor");
+      expect(await store.get()).toBe("secure-cursor");
       await store.clear();
       expect(await store.get()).toBeUndefined();
     });

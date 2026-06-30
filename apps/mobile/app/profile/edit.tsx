@@ -2,6 +2,7 @@ import React, { useState } from "react";
 import {
   ActivityIndicator,
   KeyboardAvoidingView,
+  Linking,
   Platform,
   ScrollView,
   StyleSheet,
@@ -136,6 +137,26 @@ export default function EditProfileScreen() {
           )}
         </TouchableOpacity>
 
+        {/* Deploy creator token CTA */}
+        {!creatorToken && (
+          <View style={styles.ctaBox}>
+            <Text style={styles.ctaTitle}>Launch your creator token</Text>
+            <Text style={styles.ctaBody}>
+              Deploy a SEP-41 token and link it to your profile in one flow.
+            </Text>
+            <TouchableOpacity
+              style={styles.ctaButton}
+              onPress={() => {
+                const webUrl = process.env.EXPO_PUBLIC_WEB_URL ?? "https://linkora.social";
+                Linking.openURL(`${webUrl}/onboarding/creator`);
+              }}
+              accessibilityLabel="Launch creator token wizard"
+            >
+              <Text style={styles.ctaButtonText}>Deploy creator token</Text>
+            </TouchableOpacity>
+          </View>
+        )}
+
         <TouchableOpacity
           style={styles.cancelButton}
           onPress={() => router.back()}
@@ -222,5 +243,36 @@ const styles = StyleSheet.create({
     color: "#e2e8f0",
     fontWeight: "600",
     fontSize: 15,
+  },
+  ctaBox: {
+    marginTop: 8,
+    marginBottom: 16,
+    padding: 16,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: "#4f46e5",
+    backgroundColor: "#1e1b4b",
+  },
+  ctaTitle: {
+    color: "#a5b4fc",
+    fontWeight: "700",
+    fontSize: 15,
+    marginBottom: 4,
+  },
+  ctaBody: {
+    color: "#94a3b8",
+    fontSize: 13,
+    marginBottom: 12,
+  },
+  ctaButton: {
+    backgroundColor: "#4f46e5",
+    borderRadius: 10,
+    paddingVertical: 10,
+    alignItems: "center",
+  },
+  ctaButtonText: {
+    color: "#ffffff",
+    fontWeight: "700",
+    fontSize: 14,
   },
 });

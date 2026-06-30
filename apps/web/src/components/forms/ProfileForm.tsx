@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { validateUsername, validateStellarAddress } from '@/lib/validate';
 import { FieldError } from './FieldError';
 
@@ -25,7 +25,32 @@ export function ProfileForm({ onSubmit, initialValues = {}, disabled = false }: 
   const [username, setUsername] = useState(initialValues.username ?? '');
   const [creatorToken, setCreatorToken] = useState(initialValues.creatorToken ?? '');
   const [errors, setErrors] = useState<FormErrors>({});
+  const [usernameFeedback, setUsernameFeedback] = useState<FormErrors['username']>();
+  const [usernameValid, setUsernameValid] = useState(false);
+  const [usernameTouched, setUsernameTouched] = useState(Boolean(initialValues.username));
   const [submitting, setSubmitting] = useState(false);
+
+  useEffect(() => {
+    setUsername(initialValues.username ?? '');
+    setCreatorToken(initialValues.creatorToken ?? '');
+    setUsernameTouched(Boolean(initialValues.username));
+  }, [initialValues.creatorToken, initialValues.username]);
+
+  useEffect(() => {
+    setUsernameValid(false);
+    const timer = window.setTimeout(() => {
+      if (!usernameTouched && !username.trim()) {
+        setUsernameFeedback(undefined);
+        return;
+      }
+
+      const result = validateUsername(username);
+      setUsernameFeedback(result.valid ? undefined : result.error);
+      setUsernameValid(result.valid);
+    }, 300);
+
+    return () => window.clearTimeout(timer);
+  }, [username, usernameTouched]);
 
   function validate(): FormErrors {
     const errs: FormErrors = {};
@@ -44,6 +69,8 @@ export function ProfileForm({ onSubmit, initialValues = {}, disabled = false }: 
     const errs = validate();
     if (Object.keys(errs).length > 0) {
       setErrors(errs);
+      setUsernameFeedback(errs.username);
+      setUsernameValid(false);
       return;
     }
     setSubmitting(true);
@@ -68,18 +95,34 @@ export function ProfileForm({ onSubmit, initialValues = {}, disabled = false }: 
           value={username}
           onChange={(e) => {
             setUsername(e.target.value);
+            setUsernameTouched(true);
             if (errors.username) setErrors((prev) => ({ ...prev, username: undefined }));
           }}
           disabled={disabled || submitting}
           aria-required="true"
-          aria-describedby={errors.username ? 'profile-username-error' : undefined}
-          aria-invalid={!!errors.username}
+          aria-describedby={
+            errors.username || usernameFeedback
+              ? 'profile-username-error'
+              : usernameValid
+                ? 'profile-username-valid'
+                : undefined
+          }
+          aria-invalid={!!(errors.username || usernameFeedback)}
           placeholder="e.g. alice_stellar"
           className={`w-full rounded-lg border px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-violet-500 disabled:opacity-50 ${
-            errors.username ? 'border-red-500' : 'border-gray-300'
+            errors.username || usernameFeedback
+              ? 'border-red-500'
+              : usernameValid
+                ? 'border-green-500'
+                : 'border-gray-300'
           }`}
         />
-        <FieldError id="profile-username-error" message={errors.username} />
+        <FieldError id="profile-username-error" message={errors.username || usernameFeedback} />
+        {!errors.username && !usernameFeedback && usernameValid && (
+          <p id="profile-username-valid" aria-live="polite" className="mt-1 text-sm text-green-600">
+            <span aria-hidden="true">✓</span> Username is valid.
+          </p>
+        )}
       </div>
 
       {/* Creator token (Stellar address) */}

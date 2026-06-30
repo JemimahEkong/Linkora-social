@@ -44,6 +44,7 @@ export enum GovParameter {
   GovQuorum = "GovQuorum",
   GovTimeLock = "GovTimeLock",
   GovVoteWindow = "GovVoteWindow",
+  ModerationSlashBps = "ModerationSlashBps",
 }
 
 export enum ProposalStatus {

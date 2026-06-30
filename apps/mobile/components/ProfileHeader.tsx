@@ -11,8 +11,16 @@ export interface ProfileData {
 
 interface Props {
   profile: ProfileData;
-  followerCount: number;
-  followingCount: number;
+  /**
+   * Numeric follower count. Pass `null` while the count is loading so the
+   * header renders a placeholder ("—") until the network request completes.
+   */
+  followerCount: number | null;
+  /**
+   * Numeric following count. Pass `null` while the count is loading so the
+   * header renders a placeholder ("—") until the network request completes.
+   */
+  followingCount: number | null;
   isFollowing: boolean;
   isOwnProfile?: boolean;
   onFollowersPress: () => void;
@@ -69,11 +77,23 @@ export default function ProfileHeader({
 
       <View style={styles.countsRow}>
         <Pressable onPress={onFollowersPress} accessibilityRole="button" style={styles.countItem}>
-          <Text style={styles.countNumber}>{followerCount}</Text>
+          <Text
+            style={styles.countNumber}
+            accessibilityLabel={followerCount === null ? "Followers loading" : `${followerCount} followers`}
+            testID="follower-count"
+          >
+            {followerCount === null ? "—" : followerCount}
+          </Text>
           <Text style={styles.countLabel}>Followers</Text>
         </Pressable>
         <Pressable onPress={onFollowingPress} accessibilityRole="button" style={styles.countItem}>
-          <Text style={styles.countNumber}>{followingCount}</Text>
+          <Text
+            style={styles.countNumber}
+            accessibilityLabel={followingCount === null ? "Following loading" : `${followingCount} following`}
+            testID="following-count"
+          >
+            {followingCount === null ? "—" : followingCount}
+          </Text>
           <Text style={styles.countLabel}>Following</Text>
         </Pressable>
       </View>

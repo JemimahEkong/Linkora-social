@@ -16,25 +16,15 @@ import { useRouter } from "expo-router";
 import { useWallet } from "../../hooks/useWallet";
 import { useTheme } from "../../theme/useTheme";
 import { useToast } from "../../context/ToastContext";
+import { useNetwork } from "../../hooks/useNetwork";
+import { useProfile } from "../../hooks/useProfile";
+import { addOptimisticPost } from "../../utils/db";
+import { syncPendingPosts } from "../../utils/sync";
+import { notifyFeedUpdate } from "../../hooks/useFeed";
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
 const MAX_CHARS = 280;
-
-// ── Helpers ──────────────────────────────────────────────────────────────────
-
-/**
- * Stub for the real contract call.
- * Replace with `LinkoraClient.createPost(author, content)` once the SDK is wired.
- */
-async function submitCreatePost(_author: string, _content: string): Promise<string> {
-  // TODO: replace with real SDK call, e.g.:
-  // const client = new LinkoraClient({ contractId: CONTRACT_ID, rpcUrl: RPC_URL });
-  // const postId = await client.createPost(author, content);
-  // return String(postId);
-  await new Promise((r) => setTimeout(r, 1200)); // simulate network
-  return String(Math.floor(Math.random() * 10_000) + 1);
-}
 
 // ── Screen ───────────────────────────────────────────────────────────────────
 
@@ -42,6 +32,8 @@ export default function CreatePostScreen() {
   const router = useRouter();
   const { theme } = useTheme();
   const { address, connected } = useWallet();
+  const { contractId, rpcUrl } = useNetwork();
+  const { profile } = useProfile(address ?? "");
   const { showPending, showSuccess, showError, dismissToast } = useToast();
 
   const [content, setContent] = useState("");
@@ -65,17 +57,42 @@ export default function CreatePostScreen() {
     showPending();
 
     try {
-      const postId = await submitCreatePost(address, content.trim());
+      const username = profile?.username || `${address.slice(0, 8)}…${address.slice(-6)}`;
+
+      // 1. Add optimistic post to SQLite
+      const localId = await addOptimisticPost(address, content.trim(), username);
+
+      // 2. Notify the feed hook that SQLite has changed
+      notifyFeedUpdate();
+
       dismissToast();
-      showSuccess(postId);
-      // Navigate to the new post detail screen
-      router.replace(`/post/${postId}` as Parameters<typeof router.replace>[0]);
+      showSuccess(localId);
+
+      // 3. Navigate back to feed immediately
+      router.replace("/(tabs)/feed" as Parameters<typeof router.replace>[0]);
+
+      // 4. Submit to blockchain in background
+      void syncPendingPosts(contractId, rpcUrl).then(() => {
+        notifyFeedUpdate();
+      });
     } catch (err) {
       dismissToast();
       showError(err instanceof Error ? err.message : "Failed to publish post.");
       setSubmitting(false);
     }
-  }, [submitDisabled, address, content, router, showPending, showSuccess, showError, dismissToast]);
+  }, [
+    submitDisabled,
+    address,
+    content,
+    router,
+    showPending,
+    showSuccess,
+    showError,
+    dismissToast,
+    profile,
+    contractId,
+    rpcUrl,
+  ]);
 
   const styles = useMemo(() => createStyles(theme), [theme]);
 

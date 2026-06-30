@@ -1,6 +1,12 @@
 "use client";
 
 import { useState, useEffect } from "react";
+import {
+  fetchPreferencesFromServer,
+  savePreferencesToBackend,
+  registerServiceWorkerAndSubscribe,
+  unsubscribeFromPush,
+} from "../../services/pushNotification";
 
 interface NotificationSettings {
   browserPushEnabled: boolean;
@@ -12,7 +18,7 @@ interface NotificationSettings {
   governanceUpdates: boolean;
 }
 
-export function NotificationsSection() {
+export function NotificationsSection({ address }: { address: string }) {
   const [settings, setSettings] = useState<NotificationSettings>({
     browserPushEnabled: false,
     newFollowers: true,
@@ -24,6 +30,7 @@ export function NotificationsSection() {
   });
   const [pushSupported, setPushSupported] = useState(false);
   const [pushPermission, setPushPermission] = useState<NotificationPermission>("default");
+  const [loading, setLoading] = useState(false);
 
   useEffect(() => {
     // Check if browser supports push notifications
@@ -32,40 +39,93 @@ export function NotificationsSection() {
       setPushPermission(Notification.permission);
     }
 
-    // Load saved settings from localStorage
-    const saved = localStorage.getItem("notification_settings");
-    if (saved) {
+    async function loadPreferences() {
+      if (!address) return;
+      setLoading(true);
       try {
-        setSettings(JSON.parse(saved));
+        const serverPrefs = await fetchPreferencesFromServer(address);
+        if (serverPrefs) {
+          setSettings({
+            browserPushEnabled: serverPrefs.browserPushEnabled,
+            newFollowers: serverPrefs.newFollowers,
+            newLikes: serverPrefs.newLikes,
+            newComments: serverPrefs.newComments,
+            directMessages: serverPrefs.directMessages,
+            poolActivity: serverPrefs.poolActivity,
+            governanceUpdates: serverPrefs.governanceUpdates,
+          });
+        }
       } catch (error) {
-        console.error("Failed to parse notification settings:", error);
+        console.warn(
+          "Failed to load preferences from server, falling back to local storage:",
+          error
+        );
+        // Load saved settings from localStorage as fallback
+        const saved = localStorage.getItem("notification_settings");
+        if (saved) {
+          try {
+            setSettings(JSON.parse(saved));
+          } catch (e) {
+            console.error("Failed to parse local notification settings:", e);
+          }
+        }
+      } finally {
+        setLoading(false);
       }
     }
-  }, []);
+
+    loadPreferences();
+  }, [address]);
 
   async function handleTogglePush() {
     if (!pushSupported) return;
 
-    if (pushPermission === "granted") {
-      // Disable push notifications
-      setSettings((prev) => ({ ...prev, browserPushEnabled: false }));
-      setPushPermission("default");
-    } else {
-      // Request permission
-      const permission = await Notification.requestPermission();
-      setPushPermission(permission);
-      if (permission === "granted") {
-        setSettings((prev) => ({ ...prev, browserPushEnabled: true }));
+    let updatedPushEnabled = false;
+    let subscription: PushSubscription | null = null;
+
+    try {
+      if (pushPermission === "granted") {
+        // Disable push notifications
+        updatedPushEnabled = false;
+        await unsubscribeFromPush();
+        setPushPermission("default");
+      } else {
+        // Request permission
+        const permission = await Notification.requestPermission();
+        setPushPermission(permission);
+        if (permission === "granted") {
+          updatedPushEnabled = true;
+          subscription = await registerServiceWorkerAndSubscribe();
+        }
       }
+
+      const updatedSettings = { ...settings, browserPushEnabled: updatedPushEnabled };
+      setSettings(updatedSettings);
+      localStorage.setItem("notification_settings", JSON.stringify(updatedSettings));
+
+      if (address) {
+        await savePreferencesToBackend(address, updatedSettings, subscription);
+      }
+    } catch (error) {
+      console.error("Failed to update push subscription settings:", error);
     }
   }
 
-  function handleToggleSetting(key: keyof NotificationSettings) {
-    setSettings((prev) => {
-      const updated = { ...prev, [key]: !prev[key] };
-      localStorage.setItem("notification_settings", JSON.stringify(updated));
-      return updated;
-    });
+  async function handleToggleSetting(key: keyof NotificationSettings) {
+    const updated = { ...settings, [key]: !settings[key] };
+    setSettings(updated);
+    localStorage.setItem("notification_settings", JSON.stringify(updated));
+
+    if (!address) return;
+    try {
+      let subscription: PushSubscription | null = null;
+      if (updated.browserPushEnabled) {
+        subscription = await registerServiceWorkerAndSubscribe();
+      }
+      await savePreferencesToBackend(address, updated, subscription);
+    } catch (error) {
+      console.error("Failed to save settings to server:", error);
+    }
   }
 
   return (
@@ -93,6 +153,7 @@ export function NotificationsSection() {
                 }`}
                 role="switch"
                 aria-checked={settings.browserPushEnabled}
+                aria-label="Toggle Browser Push Notifications"
               >
                 <span
                   className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${

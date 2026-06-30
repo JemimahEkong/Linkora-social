@@ -61,3 +61,14 @@ jest.mock("expo-notifications", () => ({
     MAX: 4,
   },
 }));
+
+jest.mock(
+  "expo-haptics",
+  () => ({
+    impactAsync: jest.fn(() => Promise.resolve()),
+    ImpactFeedbackStyle: {
+      Light: "light",
+    },
+  }),
+  { virtual: true }
+);

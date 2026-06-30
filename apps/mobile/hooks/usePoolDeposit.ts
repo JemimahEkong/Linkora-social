@@ -1,4 +1,5 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback } from "react";
+import { recordPoolDeposit } from "../utils/poolStore";
 
 export interface DepositState {
   pending: boolean;
@@ -25,20 +26,21 @@ export function usePoolDeposit(): UsePoolDepositReturn {
 
     try {
       if (!amount || parseFloat(amount) <= 0) {
-        throw new Error('Amount must be greater than zero');
+        throw new Error("Amount must be greater than zero");
       }
 
       if (!token) {
-        throw new Error('Token is required');
+        throw new Error("Token is required");
       }
 
       await new Promise<void>((resolve) => setTimeout(resolve, 1500));
 
       const mockTxHash = `0x${Math.random().toString(16).slice(2)}`;
+      recordPoolDeposit(poolId, amount);
       setTxHash(mockTxHash);
       setSuccess(true);
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Deposit failed. Please try again.';
+      const message = err instanceof Error ? err.message : "Deposit failed. Please try again.";
       setError(message);
     } finally {
       setPending(false);

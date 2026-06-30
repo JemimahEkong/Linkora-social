@@ -1,5 +1,5 @@
-import React, { useEffect, useMemo, useState } from "react";
-import { ActivityIndicator, ScrollView, StyleSheet, Text, View } from "react-native";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
+import { ActivityIndicator, RefreshControl, ScrollView, StyleSheet, Text, View } from "react-native";
 import { useRouter } from "expo-router";
 
 import { PoolRow, PoolSearchResult } from "../../components/PoolRow";
@@ -104,6 +104,13 @@ export default function ExploreScreen() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [searchNonce, setSearchNonce] = useState(0);
+  const [refreshing, setRefreshing] = useState(false);
+
+  const onRefresh = useCallback(async () => {
+    setRefreshing(true);
+    setSearchNonce((current) => current + 1);
+    setRefreshing(false);
+  }, []);
 
   useEffect(() => {
     const timer = setTimeout(() => {
@@ -159,6 +166,14 @@ export default function ExploreScreen() {
       <ScrollView
         keyboardShouldPersistTaps="handled"
         contentContainerStyle={[styles.content, !hasResults && styles.centerContent]}
+        refreshControl={
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={onRefresh}
+            tintColor={theme.colors.brand.primary}
+            colors={[theme.colors.brand.primary]}
+          />
+        }
       >
         {loading ? (
           <View style={styles.loadingStack}>

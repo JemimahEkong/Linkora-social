@@ -14,12 +14,25 @@ export interface LinkoraEventSubscriberConfig {
   pageLimit?: number;
   minPollIntervalMs?: number;
   maxPollIntervalMs?: number;
+  webSocketUrl?: string;
+  webSocketFactory?: WebSocketFactory;
 }
 
 interface GetEventsResult {
   events: SorobanEvent[];
   latestLedger?: number;
 }
+
+interface LinkoraWebSocket {
+  onopen: (() => void) | null;
+  onmessage: ((event: { data: unknown }) => void) | null;
+  onclose: (() => void) | null;
+  onerror: (() => void) | null;
+  send(data: string): void;
+  close(): void;
+}
+
+export type WebSocketFactory = (url: string) => LinkoraWebSocket;
 
 const DEFAULT_PAGE_LIMIT = 100;
 const DEFAULT_START_LEDGER = 0;
@@ -32,9 +45,11 @@ export class LinkoraEventSubscriber {
   private running = false;
   private stopRequested = false;
   private timer: unknown;
+  private sleepResolve?: () => void;
   private loopPromise?: Promise<void>;
   private cursor?: string;
   private pollIntervalMs: number;
+  private socket?: LinkoraWebSocket;
 
   constructor(private readonly config: LinkoraEventSubscriberConfig) {
     this.cursorStore = config.cursorStore ?? createDefaultCursorStore(config.cursorKeyOrPath);
@@ -56,15 +71,20 @@ export class LinkoraEventSubscriber {
     this.cursor = fromCursor ?? (await this.cursorStore.get());
     this.running = true;
     this.stopRequested = false;
-    this.loopPromise = this.loop();
+    this.loopPromise = this.config.webSocketUrl ? this.websocketLoop() : this.loop();
   }
 
   async stop(): Promise<void> {
     this.stopRequested = true;
     this.running = false;
+    this.socket?.close();
+    this.socket = undefined;
     if (this.timer) {
       (globalThis as { clearTimeout?: (timer: unknown) => void }).clearTimeout?.(this.timer);
+      this.timer = undefined;
     }
+    this.sleepResolve?.();
+    this.sleepResolve = undefined;
     await this.loopPromise;
   }
 
@@ -155,6 +175,78 @@ export class LinkoraEventSubscriber {
     await handler?.(event);
   }
 
+  private async websocketLoop(): Promise<void> {
+    while (!this.stopRequested) {
+      try {
+        await this.connectWebSocket();
+        this.pollIntervalMs = this.config.minPollIntervalMs ?? DEFAULT_MIN_POLL_INTERVAL_MS;
+      } catch (_err) {
+        this.backoff();
+      }
+
+      if (!this.stopRequested) {
+        await this.sleep(this.pollIntervalMs);
+      }
+    }
+  }
+
+  private connectWebSocket(): Promise<void> {
+    const url = this.config.webSocketUrl;
+    if (!url) return Promise.resolve();
+
+    const factory = this.config.webSocketFactory ?? getGlobalWebSocketFactory();
+    if (!factory) throw new Error("No WebSocket implementation available");
+
+    return new Promise((resolve, reject) => {
+      let opened = false;
+      const socket = factory(url);
+      this.socket = socket;
+
+      socket.onopen = () => {
+        opened = true;
+        socket.send(
+          JSON.stringify({
+            type: "subscribe",
+            contractId: this.config.contractId,
+            cursor: this.cursor,
+            startLedger: this.config.startLedger ?? DEFAULT_START_LEDGER,
+          })
+        );
+      };
+
+      socket.onmessage = (message) => {
+        void this.processWebSocketMessage(message.data).catch(() => {
+          socket.close();
+        });
+      };
+
+      socket.onerror = () => {
+        if (!opened) reject(new Error("WebSocket connection failed"));
+      };
+
+      socket.onclose = () => {
+        this.socket = undefined;
+        if (this.stopRequested) {
+          resolve();
+          return;
+        }
+
+        if (opened) resolve();
+        else reject(new Error("WebSocket closed before opening"));
+      };
+    });
+  }
+
+  private async processWebSocketMessage(data: unknown): Promise<void> {
+    const message =
+      typeof data === "string"
+        ? (JSON.parse(data) as { event?: SorobanEvent; events?: SorobanEvent[] })
+        : (data as { event?: SorobanEvent; events?: SorobanEvent[] });
+
+    const events = message.events ?? (message.event ? [message.event] : []);
+    await this.processBatch(events);
+  }
+
   private updatePollInterval(eventCount: number): void {
     const min = this.config.minPollIntervalMs ?? DEFAULT_MIN_POLL_INTERVAL_MS;
     if (eventCount >= (this.config.pageLimit ?? DEFAULT_PAGE_LIMIT)) {
@@ -190,8 +282,16 @@ export class LinkoraEventSubscriber {
 
       this.timer = setTimeoutImpl(() => {
         this.timer = undefined;
+        this.sleepResolve = undefined;
         resolve();
       }, ms);
+      this.sleepResolve = resolve;
     });
   }
+}
+
+function getGlobalWebSocketFactory(): WebSocketFactory | undefined {
+  const WebSocketCtor = (globalThis as { WebSocket?: new (url: string) => LinkoraWebSocket })
+    .WebSocket;
+  return WebSocketCtor ? (url: string) => new WebSocketCtor(url) : undefined;
 }

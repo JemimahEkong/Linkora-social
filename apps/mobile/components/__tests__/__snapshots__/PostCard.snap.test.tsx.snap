@@ -108,16 +108,24 @@ exports[`PostCard Snapshots renders default state correctly 1`] = `
         GABCD1...WXYZ
       </Text>
     </View>
-    <Text
+    <View
       style={
         {
-          "color": "#6B7280",
-          "fontSize": 11,
+          "alignItems": "flex-end",
         }
       }
     >
-      930d ago
-    </Text>
+      <Text
+        style={
+          {
+            "color": "#6B7280",
+            "fontSize": 11,
+          }
+        }
+      >
+        930d ago
+      </Text>
+    </View>
   </View>
   <Text
     style={
@@ -141,7 +149,7 @@ exports[`PostCard Snapshots renders default state correctly 1`] = `
     }
   >
     <View
-      accessibilityLabel="Like post"
+      accessibilityLabel="Like post, currently 42 likes"
       accessibilityRole="button"
       accessibilityState={
         {
@@ -188,22 +196,63 @@ exports[`PostCard Snapshots renders default state correctly 1`] = `
         ]
       }
     >
-      <Text
+      <View
         style={
-          [
-            {
-              "color": "#6B7280",
-              "fontSize": 12,
-              "fontWeight": "700",
-            },
-            false,
-          ]
+          {
+            "alignItems": "center",
+            "flexDirection": "row",
+            "gap": 6,
+          }
         }
       >
-        Like
-         
-        42
-      </Text>
+        <Text
+          style={
+            [
+              {
+                "color": "#6B7280",
+                "fontSize": 16,
+                "lineHeight": 18,
+              },
+              false,
+            ]
+          }
+        >
+          ♡
+        </Text>
+        <View
+          style={
+            [
+              {
+                "alignItems": "center",
+                "backgroundColor": "#F3F4F6",
+                "borderRadius": 999,
+                "justifyContent": "center",
+                "minWidth": 22,
+                "paddingHorizontal": 7,
+                "paddingVertical": 2,
+              },
+              false,
+            ]
+          }
+          testID="like-count-badge"
+        >
+          <Text
+            style={
+              [
+                {
+                  "color": "#6B7280",
+                  "fontSize": 11,
+                  "fontWeight": "700",
+                },
+                false,
+              ]
+            }
+            testID="like-count-text"
+          >
+            42
+          </Text>
+        </View>
+      </View>
     </View>
     <Text
       style={
@@ -214,8 +263,8 @@ exports[`PostCard Snapshots renders default state correctly 1`] = `
         }
       }
     >
-      Tips 
-      0
+      💰 
+      0.00
     </Text>
   </View>
 </View>
@@ -329,16 +378,24 @@ exports[`PostCard Snapshots renders with long content correctly 1`] = `
         GABCD1...WXYZ
       </Text>
     </View>
-    <Text
+    <View
       style={
         {
-          "color": "#6B7280",
-          "fontSize": 11,
+          "alignItems": "flex-end",
         }
       }
     >
-      930d ago
-    </Text>
+      <Text
+        style={
+          {
+            "color": "#6B7280",
+            "fontSize": 11,
+          }
+        }
+      >
+        930d ago
+      </Text>
+    </View>
   </View>
   <Text
     style={
@@ -362,7 +419,7 @@ exports[`PostCard Snapshots renders with long content correctly 1`] = `
     }
   >
     <View
-      accessibilityLabel="Like post"
+      accessibilityLabel="Like post, currently 42 likes"
       accessibilityRole="button"
       accessibilityState={
         {
@@ -409,22 +466,63 @@ exports[`PostCard Snapshots renders with long content correctly 1`] = `
         ]
       }
     >
-      <Text
+      <View
         style={
-          [
-            {
-              "color": "#6B7280",
-              "fontSize": 12,
-              "fontWeight": "700",
-            },
-            false,
-          ]
+          {
+            "alignItems": "center",
+            "flexDirection": "row",
+            "gap": 6,
+          }
         }
       >
-        Like
-         
-        42
-      </Text>
+        <Text
+          style={
+            [
+              {
+                "color": "#6B7280",
+                "fontSize": 16,
+                "lineHeight": 18,
+              },
+              false,
+            ]
+          }
+        >
+          ♡
+        </Text>
+        <View
+          style={
+            [
+              {
+                "alignItems": "center",
+                "backgroundColor": "#F3F4F6",
+                "borderRadius": 999,
+                "justifyContent": "center",
+                "minWidth": 22,
+                "paddingHorizontal": 7,
+                "paddingVertical": 2,
+              },
+              false,
+            ]
+          }
+          testID="like-count-badge"
+        >
+          <Text
+            style={
+              [
+                {
+                  "color": "#6B7280",
+                  "fontSize": 11,
+                  "fontWeight": "700",
+                },
+                false,
+              ]
+            }
+            testID="like-count-text"
+          >
+            42
+          </Text>
+        </View>
+      </View>
     </View>
     <Text
       style={
@@ -435,8 +533,8 @@ exports[`PostCard Snapshots renders with long content correctly 1`] = `
         }
       }
     >
-      Tips 
-      0
+      💰 
+      0.00
     </Text>
   </View>
 </View>
@@ -550,16 +648,24 @@ exports[`PostCard Snapshots renders with zero likes correctly 1`] = `
         GABCD1...WXYZ
       </Text>
     </View>
-    <Text
+    <View
       style={
         {
-          "color": "#6B7280",
-          "fontSize": 11,
+          "alignItems": "flex-end",
         }
       }
     >
-      930d ago
-    </Text>
+      <Text
+        style={
+          {
+            "color": "#6B7280",
+            "fontSize": 11,
+          }
+        }
+      >
+        930d ago
+      </Text>
+    </View>
   </View>
   <Text
     style={
@@ -583,7 +689,7 @@ exports[`PostCard Snapshots renders with zero likes correctly 1`] = `
     }
   >
     <View
-      accessibilityLabel="Like post"
+      accessibilityLabel="Like post, currently 0 likes"
       accessibilityRole="button"
       accessibilityState={
         {
@@ -630,22 +736,63 @@ exports[`PostCard Snapshots renders with zero likes correctly 1`] = `
         ]
       }
     >
-      <Text
+      <View
         style={
-          [
-            {
-              "color": "#6B7280",
-              "fontSize": 12,
-              "fontWeight": "700",
-            },
-            false,
-          ]
+          {
+            "alignItems": "center",
+            "flexDirection": "row",
+            "gap": 6,
+          }
         }
       >
-        Like
-         
-        0
-      </Text>
+        <Text
+          style={
+            [
+              {
+                "color": "#6B7280",
+                "fontSize": 16,
+                "lineHeight": 18,
+              },
+              false,
+            ]
+          }
+        >
+          ♡
+        </Text>
+        <View
+          style={
+            [
+              {
+                "alignItems": "center",
+                "backgroundColor": "#F3F4F6",
+                "borderRadius": 999,
+                "justifyContent": "center",
+                "minWidth": 22,
+                "paddingHorizontal": 7,
+                "paddingVertical": 2,
+              },
+              false,
+            ]
+          }
+          testID="like-count-badge"
+        >
+          <Text
+            style={
+              [
+                {
+                  "color": "#6B7280",
+                  "fontSize": 11,
+                  "fontWeight": "700",
+                },
+                false,
+              ]
+            }
+            testID="like-count-text"
+          >
+            0
+          </Text>
+        </View>
+      </View>
     </View>
     <Text
       style={
@@ -656,8 +803,8 @@ exports[`PostCard Snapshots renders with zero likes correctly 1`] = `
         }
       }
     >
-      Tips 
-      0
+      💰 
+      0.00
     </Text>
   </View>
 </View>

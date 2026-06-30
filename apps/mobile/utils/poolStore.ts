@@ -214,6 +214,20 @@ export function recordPoolWithdrawal(
   return created;
 }
 
+export function recordPoolDeposit(poolId: string, amount: string): void {
+  updatePool(poolId, (pool) => ({
+    ...pool,
+    balance: `${amount} ${pool.token}`,
+  }));
+}
+
+export function setPoolBalance(poolId: string, balance: string): void {
+  updatePool(poolId, (pool) => ({
+    ...pool,
+    balance,
+  }));
+}
+
 export function resetPoolState(poolId?: string): void {
   if (poolId) {
     poolCache.delete(poolId);

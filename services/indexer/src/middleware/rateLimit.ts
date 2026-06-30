@@ -3,8 +3,9 @@ import { logger } from "../logger";
 
 // ── Configuration ─────────────────────────────────────────────────────────────
 
-const RATE_LIMIT_READ_RPM = parseInt(process.env.RATE_LIMIT_READ_RPM || "60", 10);
-const RATE_LIMIT_WRITE_RPM = parseInt(process.env.RATE_LIMIT_WRITE_RPM || "10", 10);
+const RATE_LIMIT_ANON_RPM = parseInt(process.env.RATE_LIMIT_ANON_RPM || "100", 10);
+const RATE_LIMIT_AUTH_RPM = parseInt(process.env.RATE_LIMIT_AUTH_RPM || "300", 10);
+const RATE_LIMIT_WRITE_RPM = parseInt(process.env.RATE_LIMIT_WRITE_RPM || "50", 10);
 const WINDOW_MS = 60_000; // 1 minute
 
 // ── In-memory sliding window implementation ────────────────────────────────────
@@ -25,10 +26,8 @@ class RateLimiter {
       return true;
     }
 
-    // Remove expired requests outside the window
     window.requests = window.requests.filter((time) => now - time < WINDOW_MS);
 
-    // Check if we're under the limit
     if (window.requests.length < limit) {
       window.requests.push(now);
       return true;
@@ -57,7 +56,6 @@ class RateLimiter {
       return 0;
     }
 
-    // Clean expired requests
     window.requests = window.requests.filter((time) => now - time < WINDOW_MS);
     return window.requests.length;
   }
@@ -78,7 +76,6 @@ function getClientIP(req: Request): string {
 // ── Helper: determine if endpoint is write ────────────────────────────────────
 
 function isWriteEndpoint(path: string, method: string): boolean {
-  // POST, PUT, DELETE, PATCH are write methods
   return ["POST", "PUT", "DELETE", "PATCH"].includes(method);
 }
 
@@ -86,8 +83,9 @@ function isWriteEndpoint(path: string, method: string): boolean {
 
 export function rateLimitRead(req: Request, res: Response, next: NextFunction): void {
   const ip = getClientIP(req);
+  const limit = req.context?.stellarAddress ? RATE_LIMIT_AUTH_RPM : RATE_LIMIT_ANON_RPM;
 
-  if (limiter.isAllowed(ip, RATE_LIMIT_READ_RPM)) {
+  if (limiter.isAllowed(ip, limit)) {
     next();
     return;
   }
@@ -100,7 +98,7 @@ export function rateLimitRead(req: Request, res: Response, next: NextFunction): 
       requestId: req.context?.requestId,
       ipAddress: ip,
       endpoint: req.path,
-      limit: RATE_LIMIT_READ_RPM,
+      limit,
     },
     "Rate limit exceeded for read endpoint"
   );
@@ -115,10 +113,10 @@ export function rateLimitRead(req: Request, res: Response, next: NextFunction): 
 // ── Rate limit middleware for write endpoints ──────────────────────────────────
 
 export function rateLimitWrite(req: Request, res: Response, next: NextFunction): void {
-  // For write endpoints, use stellar address as key if available, otherwise fall back to IP
   const key = req.context?.stellarAddress || getClientIP(req);
+  const limit = req.context?.stellarAddress ? RATE_LIMIT_AUTH_RPM : RATE_LIMIT_WRITE_RPM;
 
-  if (limiter.isAllowed(key, RATE_LIMIT_WRITE_RPM)) {
+  if (limiter.isAllowed(key, limit)) {
     next();
     return;
   }
@@ -131,7 +129,7 @@ export function rateLimitWrite(req: Request, res: Response, next: NextFunction):
       requestId: req.context?.requestId,
       identifier: key,
       endpoint: req.path,
-      limit: RATE_LIMIT_WRITE_RPM,
+      limit,
     },
     "Rate limit exceeded for write endpoint"
   );

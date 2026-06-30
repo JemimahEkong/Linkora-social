@@ -51,9 +51,43 @@ export class RelayAuthError extends Error {
 
 export class RelayClient {
   private baseUrl: string;
+  private ws: WebSocket | null = null;
+  private messageListeners: Set<(payload: any) => void> = new Set();
 
   constructor(baseUrl: string) {
     this.baseUrl = baseUrl.replace(/\/$/, ''); // Remove trailing slash
+  }
+
+  /**
+   * Connect to the real-time WebSocket for pushes.
+   */
+  connectWs(address: string) {
+    if (this.ws) return;
+    const wsUrl = this.baseUrl.replace(/^http/, 'ws') + `/ws?address=${address}`;
+    this.ws = new WebSocket(wsUrl);
+    this.ws.onmessage = (event) => {
+      try {
+        const payload = JSON.parse(event.data as string);
+        this.messageListeners.forEach(listener => listener(payload));
+      } catch (e) {}
+    };
+    this.ws.onclose = () => {
+      this.ws = null;
+    };
+  }
+
+  onMessage(listener: (payload: any) => void) {
+    this.messageListeners.add(listener);
+    return () => this.messageListeners.delete(listener);
+  }
+
+  sendTypingStatus(recipient: string) {
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify({
+        type: 'typing_status',
+        recipient
+      }));
+    }
   }
 
   /**

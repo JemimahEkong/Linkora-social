@@ -4,6 +4,7 @@
 
 import { Request, Response, NextFunction } from 'express';
 import { generateRequestId } from './utils';
+import { logger } from './logger';
 
 // Extend Express Request type to include custom properties
 declare global {
@@ -11,6 +12,7 @@ declare global {
   namespace Express {
     interface Request {
       requestId: string;
+      userId?: string;
     }
   }
 }
@@ -25,25 +27,30 @@ export function requestIdMiddleware(req: Request, res: Response, next: NextFunct
 }
 
 /**
- * Log incoming requests.
+ * Log incoming requests and response summaries at info level.
  */
 export function requestLoggerMiddleware(req: Request, res: Response, next: NextFunction) {
   const start = Date.now();
-  
-  console.log(`[${req.requestId}] ${req.method} ${req.path} - ${req.ip}`);
-  
+
+  logger.info({ requestId: req.requestId, method: req.method, path: req.path, ip: req.ip }, 'Incoming request');
+
   res.on('finish', () => {
     const duration = Date.now() - start;
-    console.log(
-      `[${req.requestId}] ${req.method} ${req.path} - ${res.statusCode} - ${duration}ms`
-    );
+    logger.info({
+      requestId: req.requestId,
+      method: req.method,
+      path: req.path,
+      statusCode: res.statusCode,
+      duration,
+      ...(req.userId && { userId: req.userId }),
+    }, 'Request completed');
   });
-  
+
   next();
 }
 
 /**
- * Global error handler.
+ * Global error handler — logs full stack trace at error level.
  */
 export function errorHandler(
   error: Error,
@@ -51,9 +58,8 @@ export function errorHandler(
   res: Response,
   _next: NextFunction
 ) {
-  console.error(`[${req.requestId}] Error:`, error);
+  logger.error({ requestId: req.requestId, err: error }, 'Unhandled error');
 
-  // Don't leak internal errors in production
   const isDevelopment = process.env.NODE_ENV === 'development';
   const message = isDevelopment ? error.message : 'Internal server error';
 

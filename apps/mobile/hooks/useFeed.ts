@@ -1,94 +1,39 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Post } from "../components/PostCard";
+import { useNetwork } from "./useNetwork";
+import { initDatabase, getCachedPosts, evictStaleCache } from "../utils/db";
+import { fetchAndCachePosts, syncPendingPosts } from "../utils/sync";
 
 const PAGE_SIZE = 10;
-const deletedPostIds = new Set<string>();
-const deleteListeners = new Set<() => void>();
 
-const ALL_POSTS: Post[] = [
-  {
-    id: 1,
-    author: "GABCD1234567890ABCDEFGHIJKLMNOPQRSTUVWXYZ",
-    username: "stellar_dev",
-    content: "Just deployed my first smart contract on Stellar! 🚀",
-    tip_total: 100,
-    timestamp: Math.floor(Date.now() / 1000) - 3600,
-    like_count: 5,
-  },
-  {
-    id: 2,
-    author: "GXYZ9876543210ABCDEFGHIJKLMNOPQRSTUVWXYZ",
-    username: "crypto_enthusiast",
-    content: "The SocialFi ecosystem is growing fast. Excited to be part of it!",
-    tip_total: 50,
-    timestamp: Math.floor(Date.now() / 1000) - 7200,
-    like_count: 3,
-  },
-  {
-    id: 3,
-    author: "GABCD1234567890ABCDEFGHIJKLMNOPQRSTUVWXYZ",
-    username: "stellar_dev",
-    content: "Working on a new DeFi protocol. Stay tuned! 🔥",
-    tip_total: 200,
-    timestamp: Math.floor(Date.now() / 1000) - 14400,
-    like_count: 12,
-  },
-  {
-    id: 4,
-    author: "GDEF5678901234ABCDEFGHIJKLMNOPQRSTUVWXYZ",
-    username: "linkora_fan",
-    content: "Linkora is the future of decentralised social. #Stellar",
-    tip_total: 75,
-    timestamp: Math.floor(Date.now() / 1000) - 21600,
-    like_count: 8,
-  },
-  {
-    id: 5,
-    author: "GHIJ1234567890ABCDEFGHIJKLMNOPQRSTUVWXYZ",
-    username: "soroban_builder",
-    content: "Soroban smart contracts make on-chain social possible. 🌟",
-    tip_total: 300,
-    timestamp: Math.floor(Date.now() / 1000) - 28800,
-    like_count: 20,
-  },
-];
+// Global event system for notifying feed updates (optimistic post creation/confirmations)
+const feedUpdateListeners = new Set<() => void>();
 
-function isDeleted(postId: Post["id"]): boolean {
-  return deletedPostIds.has(String(postId));
+export function notifyFeedUpdate(): void {
+  feedUpdateListeners.forEach((listener) => listener());
 }
 
-export function getFeedPostById(postId: string): Post | null {
-  return ALL_POSTS.find((post) => String(post.id) === postId && !isDeleted(post.id)) ?? null;
+export function subscribeToFeedUpdates(listener: () => void): () => void {
+  feedUpdateListeners.add(listener);
+  return () => {
+    feedUpdateListeners.delete(listener);
+  };
+}
+
+export function getFeedPostById(postId: string): Promise<Post | null> {
+  // Return via DB import if needed, or query cache.
+  // Note: Since this is now async, screens should fetch it asynchronously.
+  return import("../utils/db").then((db) => db.getCachedPostById(postId));
 }
 
 export const getFeedPost = getFeedPostById;
 
 export function markFeedPostDeleted(postId: string | number): void {
-  deletedPostIds.add(String(postId));
-  deleteListeners.forEach((listener) => listener());
-}
-
-export function subscribeToDeletedPosts(listener: () => void): () => void {
-  deleteListeners.add(listener);
-  return () => {
-    deleteListeners.delete(listener);
-  };
-}
-
-/**
- * Fetches a page of posts using cursor-based pagination.
- *
- * Replace the mock implementation with real `get_post` contract calls
- * once the Soroban client is wired up.
- */
-async function fetchPostPage(cursor: number, limit: number): Promise<Post[]> {
-  await new Promise<void>((resolve) => setTimeout(resolve, 400));
-
-  const visiblePosts = ALL_POSTS.filter((post) => !deletedPostIds.has(String(post.id)));
-
-  // cursor is the last seen post id (0 = start from beginning)
-  const startIndex = cursor === 0 ? 0 : visiblePosts.findIndex((p) => p.id === cursor) + 1;
-  return visiblePosts.slice(startIndex, startIndex + limit);
+  // Mark post deleted in local cache
+  import("../utils/db").then(async (db) => {
+    await db.deleteCachedPost(String(postId));
+    notifyFeedUpdate();
+  });
 }
 
 export interface UseFeedReturn {
@@ -101,56 +46,116 @@ export interface UseFeedReturn {
 }
 
 export function useFeed(): UseFeedReturn {
+  const { contractId, rpcUrl } = useNetwork();
   const [posts, setPosts] = useState<Post[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [hasMore, setHasMore] = useState(true);
 
-  // cursor = id of the last loaded post (0 = initial load)
-  const cursorRef = useRef<number>(0);
+  const offsetRef = useRef(0);
   const loadingRef = useRef(false);
 
-  const load = useCallback(async (cursor: number, replace: boolean) => {
-    if (loadingRef.current) return;
-    loadingRef.current = true;
-    setLoading(true);
-    setError(null);
-
+  // Load posts from SQLite cache
+  const loadFromCache = useCallback(async (limit: number, replace: boolean) => {
     try {
-      const fetched = await fetchPostPage(cursor, PAGE_SIZE);
-      setPosts((prev) => (replace ? fetched : [...prev, ...fetched]));
-      setHasMore(fetched.length >= PAGE_SIZE);
-      if (fetched.length > 0) {
-        cursorRef.current = Number(fetched[fetched.length - 1].id);
-      }
-    } catch {
-      setError("Failed to load posts. Please try again.");
-    } finally {
-      setLoading(false);
-      loadingRef.current = false;
+      const offset = replace ? 0 : offsetRef.current;
+      const cached = await getCachedPosts(limit, offset);
+
+      setPosts((prev) => {
+        const next = replace ? cached : [...prev, ...cached];
+        offsetRef.current = next.length;
+        return next;
+      });
+      setHasMore(cached.length >= limit);
+    } catch (err) {
+      console.warn("Failed to load posts from SQLite cache:", err);
     }
   }, []);
 
-  useEffect(() => {
-    load(0, true);
-  }, [load]);
+  // Fetch from network, reconcile, and reload cache
+  const syncWithNetwork = useCallback(
+    async (replace: boolean) => {
+      if (loadingRef.current) return;
+      loadingRef.current = true;
+      setLoading(true);
+      setError(null);
 
+      try {
+        // 1. Initialize DB if not done
+        await initDatabase();
+
+        // 2. Fetch remote page and upsert to SQLite
+        const offset = replace ? 0 : offsetRef.current;
+        await fetchAndCachePosts(PAGE_SIZE, offset, contractId, rpcUrl);
+
+        // 3. Evict stale rows periodically on initial refresh
+        if (replace) {
+          await evictStaleCache();
+        }
+
+        // 4. Reload from SQLite (the entire loaded list so far, to refresh all visible posts)
+        const currentLoadedCount = replace ? PAGE_SIZE : posts.length + PAGE_SIZE;
+        const cached = await getCachedPosts(currentLoadedCount, 0);
+        setPosts(cached);
+        offsetRef.current = cached.length;
+        setHasMore(cached.length >= currentLoadedCount);
+
+        // 5. Fire background sync for pending posts
+        void syncPendingPosts(contractId, rpcUrl).then(() => {
+          notifyFeedUpdate();
+        });
+      } catch (err) {
+        console.warn("Network sync failed, displaying cached data:", err);
+        // Fallback: just load from cache if we haven't already
+        if (posts.length === 0) {
+          await loadFromCache(PAGE_SIZE, true);
+        }
+        setError("Offline mode. Serving cached posts.");
+      } finally {
+        setLoading(false);
+        loadingRef.current = false;
+      }
+    },
+    [contractId, rpcUrl, posts.length, loadFromCache]
+  );
+
+  // Initial load
   useEffect(() => {
-    return subscribeToDeletedPosts(() => {
-      setPosts((current) => current.filter((post) => !deletedPostIds.has(String(post.id))));
+    let active = true;
+    async function init() {
+      await initDatabase();
+      if (!active) return;
+      // Load cache instantly
+      await loadFromCache(PAGE_SIZE, true);
+      setLoading(false);
+      // Trigger network sync in background
+      void syncWithNetwork(true);
+    }
+    init();
+    return () => {
+      active = false;
+    };
+  }, [loadFromCache, syncWithNetwork]);
+
+  // Subscribe to feed updates (e.g. from optimistic creation or sync confirmation)
+  useEffect(() => {
+    return subscribeToFeedUpdates(async () => {
+      const limit = Math.max(PAGE_SIZE, posts.length);
+      const cached = await getCachedPosts(limit, 0);
+      setPosts(cached);
+      offsetRef.current = cached.length;
     });
-  }, []);
+  }, [posts.length]);
 
   const loadMore = useCallback(() => {
     if (!loading && hasMore) {
-      load(cursorRef.current, false);
+      void syncWithNetwork(false);
     }
-  }, [loading, hasMore, load]);
+  }, [loading, hasMore, syncWithNetwork]);
 
   const refresh = useCallback(() => {
-    cursorRef.current = 0;
-    load(0, true);
-  }, [load]);
+    void syncWithNetwork(true);
+  }, [syncWithNetwork]);
 
   return { posts, loading, error, hasMore, loadMore, refresh };
 }

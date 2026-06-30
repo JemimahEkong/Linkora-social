@@ -39,9 +39,9 @@ export function CreatorTokenPanel({
       aria-label="Creator Token details"
       className="bg-[var(--bg-secondary)] p-6 rounded-xl border border-[var(--bg-tertiary)] flex flex-col gap-4"
     >
-      <h3 className="text-lg font-semibold text-[var(--text-primary)]">Creator Token</h3>
+      <h2 className="text-lg font-semibold text-[var(--text-primary)]">Creator Token</h2>
 
-      <dl className="grid grid-cols-2 gap-4">
+      <dl className="grid grid-cols-1 sm:grid-cols-2 gap-4">
         {/* Token Address */}
         <div className="flex flex-col gap-1">
           <dt className="text-sm text-[var(--text-muted)]">Token Address</dt>
@@ -57,7 +57,7 @@ export function CreatorTokenPanel({
         </div>
 
         {/* Tips */}
-        <div className="flex flex-col gap-1 col-span-2">
+        <div className="flex flex-col gap-1 sm:col-span-2">
           <dt className="text-sm text-[var(--text-muted)]">Total Tips Received</dt>
           <dd className="font-medium text-xl text-[var(--success)]">
             {totalTipsReceived.toLocaleString()}

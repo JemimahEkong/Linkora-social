@@ -149,3 +149,11 @@ printf  "║  %-20s %-38s ║\n" "admin:"         "$ADMIN_ADDRESS"
 printf  "║  %-20s %-38s ║\n" "treasury:"      "$TREASURY_ADDRESS"
 printf  "║  %-20s %-38s ║\n" "fee_bps:"       "$FEE_BPS"
 echo "╚══════════════════════════════════════════════════════════════╝"
+
+if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
+  echo "contract_id=$CONTRACT_ID" >> "$GITHUB_OUTPUT"
+fi
+
+if [[ -n "${GITHUB_ENV:-}" ]]; then
+  echo "CONTRACT_ID=$CONTRACT_ID" >> "$GITHUB_ENV"
+fi

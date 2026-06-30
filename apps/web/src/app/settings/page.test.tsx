@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { axe } from "jest-axe";
 import SettingsPage from "./page";
 
@@ -115,11 +115,14 @@ describe("SettingsPage", () => {
         expect(screen.getByText("Settings")).toBeInTheDocument();
       });
 
+      expect(screen.getByText("Appearance")).toBeInTheDocument();
       expect(screen.getByText("Profile")).toBeInTheDocument();
       expect(screen.getByText("Wallet")).toBeInTheDocument();
-      expect(screen.getByText("Direct Messages")).toBeInTheDocument();
+      expect(screen.getAllByText("Direct Messages").length).toBeGreaterThan(0);
       expect(screen.getByText("Notifications")).toBeInTheDocument();
+      expect(screen.getByText("Block List")).toBeInTheDocument();
       expect(screen.getByText("Governance")).toBeInTheDocument();
+      expect(screen.getByText("Keyboard Shortcuts")).toBeInTheDocument();
       expect(screen.getByText("Danger Zone")).toBeInTheDocument();
     });
 
@@ -132,6 +135,19 @@ describe("SettingsPage", () => {
 
       const h2Headings = screen.getAllByRole("heading", { level: 2 });
       expect(h2Headings.length).toBeGreaterThan(0);
+    });
+
+    it("should persist theme preference and apply it to the document", async () => {
+      render(<SettingsPage />);
+
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: "Dark" })).toBeInTheDocument();
+      });
+
+      fireEvent.click(screen.getByRole("button", { name: "Dark" }));
+
+      expect(localStorageMock.getItem("linkora_theme")).toBe("dark");
+      expect(document.documentElement.dataset.theme).toBe("dark");
     });
   });
 });

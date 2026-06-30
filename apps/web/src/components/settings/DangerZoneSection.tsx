@@ -25,6 +25,9 @@ export function DangerZoneSection({ address }: DangerZoneSectionProps) {
     setError("");
 
     try {
+      const { signTransaction } = await import("@stellar/freighter-api");
+      const { rpc: rpcModule, Transaction } = await import("@stellar/stellar-sdk");
+
       const client = new LinkoraClient({
         contractId: process.env.NEXT_PUBLIC_CONTRACT_ID || "",
         rpcUrl: process.env.NEXT_PUBLIC_RPC_URL || "https://soroban-testnet.stellar.org",
@@ -33,8 +36,25 @@ export function DangerZoneSection({ address }: DangerZoneSectionProps) {
       // Build delete transaction XDR
       const txXdr = client.deleteProfile(address);
 
-      // TODO: Sign and submit transaction using wallet
-      console.log("Delete Profile Transaction XDR:", txXdr);
+      const signedXdr = await signTransaction(txXdr, {
+        network: "TESTNET",
+        accountToSign: address,
+      });
+
+      const networkPassphrase =
+        process.env.NEXT_PUBLIC_NETWORK_PASSPHRASE ?? "Test SDF Network ; September 2015";
+      const server = new rpcModule.Server(
+        process.env.NEXT_PUBLIC_RPC_URL ?? "https://soroban-testnet.stellar.org"
+      );
+
+      const tx = new Transaction(signedXdr, networkPassphrase);
+      const result = await server.sendTransaction(tx);
+
+      if (result.status === "ERROR" || result.status === "DUPLICATE") {
+        throw new Error(`Delete profile transaction rejected: ${result.status}`);
+      }
+
+      await waitForConfirmation(server, result.hash);
 
       // Redirect to home after successful deletion
       router.push("/");
@@ -70,9 +90,9 @@ export function DangerZoneSection({ address }: DangerZoneSectionProps) {
 
       {/* Confirmation Dialog */}
       {showConfirmDialog && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50" role="dialog" aria-modal="true" aria-label="Delete profile confirmation">
           <div className="bg-white rounded-lg max-w-md w-full p-6">
-            <h3 className="text-lg font-semibold mb-2 text-gray-900">Delete Profile?</h3>
+            <h2 className="text-lg font-semibold mb-2 text-gray-900">Delete Profile?</h2>
             <p className="text-sm text-gray-600 mb-4">
               This will permanently delete your profile, posts, and all associated data. This action
               cannot be undone.
@@ -87,8 +107,13 @@ export function DangerZoneSection({ address }: DangerZoneSectionProps) {
                 type="text"
                 value={confirmAddress}
                 onChange={(e) => {
-                  setConfirmAddress(e.target.value);
-                  setError("");
+                  const val = e.target.value;
+                  setConfirmAddress(val);
+                  if (val !== "" && val !== address) {
+                    setError("Address does not match. Please type your address exactly.");
+                  } else {
+                    setError("");
+                  }
                 }}
                 placeholder={address}
                 className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm font-mono focus:outline-none focus:ring-2 focus:ring-red-500"
@@ -98,7 +123,7 @@ export function DangerZoneSection({ address }: DangerZoneSectionProps) {
             </div>
 
             {error && (
-              <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg text-red-700 text-sm">
+              <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg text-red-700 text-sm" role="alert">
                 {error}
               </div>
             )}
@@ -128,4 +153,20 @@ export function DangerZoneSection({ address }: DangerZoneSectionProps) {
       )}
     </section>
   );
+}
+
+async function waitForConfirmation(
+  server: any,
+  hash: string,
+  maxAttempts = 20,
+  intervalMs = 3000
+): Promise<void> {
+  const interval = process.env.NODE_ENV === "test" ? 0 : intervalMs;
+  for (let i = 0; i < maxAttempts; i++) {
+    await new Promise((r) => setTimeout(r, interval));
+    const tx = await server.getTransaction(hash);
+    if (tx.status === "SUCCESS") return;
+    if (tx.status === "FAILED") throw new Error(`Transaction ${hash} failed on-chain.`);
+  }
+  throw new Error(`Transaction ${hash} timed out waiting for confirmation.`);
 }

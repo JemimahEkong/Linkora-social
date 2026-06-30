@@ -3,6 +3,7 @@ import { axe } from "jest-axe";
 import { WalletSection } from "./WalletSection";
 
 const mockDisconnect = jest.fn();
+const mockConnect = jest.fn();
 const mockPush = jest.fn();
 
 jest.mock("@/hooks/useWallet", () => ({
@@ -10,6 +11,7 @@ jest.mock("@/hooks/useWallet", () => ({
     address: "GABC1234567890ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890ABCD",
     network: "Testnet",
     disconnect: mockDisconnect,
+    connect: mockConnect,
   }),
 }));
 
@@ -53,6 +55,15 @@ describe("WalletSection", () => {
 
     expect(mockDisconnect).toHaveBeenCalledTimes(1);
     expect(mockPush).toHaveBeenCalledWith("/");
+  });
+
+  it("should call connect when switch account button is clicked", () => {
+    render(<WalletSection />);
+
+    const switchButton = screen.getByText("Switch Account");
+    fireEvent.click(switchButton);
+
+    expect(mockConnect).toHaveBeenCalledTimes(1);
   });
 
   it("should copy address to clipboard", () => {

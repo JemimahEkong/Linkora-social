@@ -9,7 +9,7 @@ describe("apple-app-site-association", () => {
   it("has a valid appID and supported path patterns", () => {
     const aasaPath = path.join(
       __dirname,
-      "../../../packages/web/public/.well-known/apple-app-site-association"
+      "../../../apps/web/public/.well-known/apple-app-site-association"
     );
     const raw = fs.readFileSync(aasaPath, "utf8");
     const data = JSON.parse(stripBlockComment(raw));

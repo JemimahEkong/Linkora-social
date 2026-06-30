@@ -38,6 +38,9 @@ export function DmKeySection({ address }: DmKeySectionProps) {
     setSuccessMessage("");
 
     try {
+      const { signTransaction } = await import("@stellar/freighter-api");
+      const { rpc: rpcModule, Transaction } = await import("@stellar/stellar-sdk");
+
       // Generate new X25519 keypair
       const keypair = generateDmKeypair();
 
@@ -49,8 +52,25 @@ export function DmKeySection({ address }: DmKeySectionProps) {
       // Build transaction XDR
       const txXdr = client.publishDmKey(address, keypair.publicKey);
 
-      // TODO: Sign and submit transaction using wallet
-      console.log("DM Key Transaction XDR:", txXdr);
+      const signedXdr = await signTransaction(txXdr, {
+        network: "TESTNET",
+        accountToSign: address,
+      });
+
+      const networkPassphrase =
+        process.env.NEXT_PUBLIC_NETWORK_PASSPHRASE ?? "Test SDF Network ; September 2015";
+      const server = new rpcModule.Server(
+        process.env.NEXT_PUBLIC_RPC_URL ?? "https://soroban-testnet.stellar.org"
+      );
+
+      const tx = new Transaction(signedXdr, networkPassphrase);
+      const result = await server.sendTransaction(tx);
+
+      if (result.status === "ERROR" || result.status === "DUPLICATE") {
+        throw new Error(`DM Key transaction rejected: ${result.status}`);
+      }
+
+      await waitForConfirmation(server, result.hash);
 
       // Store private key securely (in a real app, this should be encrypted and stored securely)
       localStorage.setItem(
@@ -154,4 +174,20 @@ export function DmKeySection({ address }: DmKeySectionProps) {
       </div>
     </section>
   );
+}
+
+async function waitForConfirmation(
+  server: any,
+  hash: string,
+  maxAttempts = 20,
+  intervalMs = 3000
+): Promise<void> {
+  const interval = process.env.NODE_ENV === "test" ? 0 : intervalMs;
+  for (let i = 0; i < maxAttempts; i++) {
+    await new Promise((r) => setTimeout(r, interval));
+    const tx = await server.getTransaction(hash);
+    if (tx.status === "SUCCESS") return;
+    if (tx.status === "FAILED") throw new Error(`Transaction ${hash} failed on-chain.`);
+  }
+  throw new Error(`Transaction ${hash} timed out waiting for confirmation.`);
 }

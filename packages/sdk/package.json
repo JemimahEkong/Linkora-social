@@ -49,11 +49,27 @@
     "ajv": "^8.17.1"
   },
   "devDependencies": {
-    "@types/jest": "^29.5.12",
+    "@types/jest": "^29.5.14",
     "jest": "^29.7.0",
-    "ts-jest": "^29.1.2",
+    "ts-jest": "^29.4.11",
     "typedoc": "^0.27.9",
     "typescript": "^5.8.3"
+  },
+  "peerDependencies": {
+    "@ledgerhq/hw-app-str": "^7.0.0",
+    "@ledgerhq/hw-transport-node-hid": "^6.0.0",
+    "@ledgerhq/hw-transport-webhid": "^6.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@ledgerhq/hw-transport-webhid": {
+      "optional": true
+    },
+    "@ledgerhq/hw-transport-node-hid": {
+      "optional": true
+    },
+    "@ledgerhq/hw-app-str": {
+      "optional": true
+    }
   },
   "engines": {
     "node": ">=18"

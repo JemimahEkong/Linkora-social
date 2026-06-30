@@ -11,7 +11,7 @@ test("search renders post and profile results from the NavBar", async ({ page })
             author: "GALICE1234567890",
             content: "A stellar builders update from last month.",
             tip_total: 2,
-            timestamp: 1_735_689_600,
+            timestamp: 1_733_011_200,
           },
           {
             id: "new-post",

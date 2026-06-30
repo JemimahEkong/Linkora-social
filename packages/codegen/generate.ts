@@ -355,13 +355,25 @@ function generateClient(
   // Functions whose name starts with a known read-only prefix are classified
   // as read methods (simulate-only). All others — including functions that
   // return a value but mutate state (e.g. create_post) — go in writeMethods.
+  // Additionally, some contract functions return values but are intended to be write-only.
+  // We explicitly force these to be treated as write methods.
+  const FORCE_WRITE = new Set([
+    "pay_rent",
+    "report_post",
+    "review_report",
+    "register_oracle",
+    "verify_analytics_attestation",
+    "set_rent_rate_bps",
+    "batch_bump_user_graph",
+  ]);
+
   const READ_PREFIXES = ["get_", "is_", "has_", "effective_", "gov_get_"];
   const isReadName = (name: string) => READ_PREFIXES.some((p) => name.startsWith(p));
 
   const readMethods = functions.filter(
-    (f) => f.outputs.length > 0 && f.outputs[0].type !== "void" && isReadName(f.name)
+    (f) => f.outputs.length > 0 && f.outputs[0].type !== "void" && isReadName(f.name) && !FORCE_WRITE.has(f.name)
   );
-  const writeMethods = functions.filter((f) => !readMethods.includes(f));
+  const writeMethods = functions.filter((f) => !readMethods.includes(f) || FORCE_WRITE.has(f.name));
 
   if (readMethods.length > 0) {
     lines.push("  // ── Read Methods ────────────────────────────────────────────");
@@ -547,7 +559,7 @@ function scvI128(value: number | bigint): xdr.ScVal {
 }
 
 function scvAddressVec(addresses: string[]): xdr.ScVal {
-  return nativeToScVal(addresses.map(addr => Address.fromString(addr).toScVal()), { type: "vec" });
+  return nativeToScVal(addresses.map(addr => Address.fromString(addr)), { type: "vec" });
 }
 `;
 }

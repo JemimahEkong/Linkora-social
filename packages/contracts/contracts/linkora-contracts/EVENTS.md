@@ -26,6 +26,37 @@ Emitted when a user creates or updates their profile.
   - `user`: `Address`
   - `username`: `String`
 
+### ProfileDeleted
+
+Emitted when a user deletes their profile.
+
+- **Topic 0**: `Linkora`
+- **Topic 1**: `profile_deleted`
+- **Topic 2**: `v1`
+- **Data Payload**: `ProfileDeletedEvent`
+  - `user`: `Address`
+  - `username`: `String`
+
+### Paused
+
+Emitted when the contract is paused by an admin.
+
+- **Topic 0**: `Linkora`
+- **Topic 1**: `paused`
+- **Topic 2**: `v1`
+- **Data Payload**: `PausedEvent`
+  - `admin`: `Address`
+
+### Unpaused
+
+Emitted when the contract is unpaused by an admin.
+
+- **Topic 0**: `Linkora`
+- **Topic 1**: `unpaused`
+- **Topic 2**: `v1`
+- **Data Payload**: `UnpausedEvent`
+  - `admin`: `Address`
+
 ### Follow
 
 Emitted when a user follows another user.

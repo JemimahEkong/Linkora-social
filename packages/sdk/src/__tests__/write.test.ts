@@ -1,4 +1,5 @@
 import { LinkoraClient } from "../client";
+import { InvalidInputError } from "../errors";
 
 const mockCall = jest.fn();
 const mockBuild = jest.fn();
@@ -13,7 +14,16 @@ jest.mock("@stellar/stellar-sdk", () => ({
     Api: { isSimulationError: jest.fn(), isSimulationSuccess: jest.fn() },
   },
   Contract: jest.fn(() => ({ call: mockCall })),
-  Address: { fromString: jest.fn((v: string) => ({ toScVal: () => ({ _type: "scval", _val: v, _opts: { type: "address" } }) })) },
+  Address: {
+    fromString: jest.fn((v: string) => ({
+      toScVal: () => ({ _type: "scval", _val: v, _opts: { type: "address" } }),
+    })),
+  },
+  StrKey: {
+    isValidEd25519PublicKey: jest.fn(
+      (value: string) => typeof value === "string" && value.startsWith("G")
+    ),
+  },
   nativeToScVal: jest.fn((val: unknown, opts?: unknown) => ({
     _type: "scval",
     _val: val,
@@ -101,7 +111,13 @@ describe("LinkoraClient write methods", () => {
 
   it("tip includes token argument", () => {
     expect(client.tip("GSENDER", 3, "GTOKEN", 500)).toBe(XDR);
-    expect(mockCall).toHaveBeenCalledWith("tip", addr("GSENDER"), val(3n), addr("GTOKEN"), val(500n));
+    expect(mockCall).toHaveBeenCalledWith(
+      "tip",
+      addr("GSENDER"),
+      val(3n),
+      addr("GTOKEN"),
+      val(500n)
+    );
   });
 
   it("tip accepts bigint amount", () => {
@@ -199,14 +215,7 @@ describe("LinkoraClient write methods", () => {
     const signature = new Uint8Array(64).fill(0xab);
 
     expect(
-      client.verifyAnalyticsAttestation(
-        "default",
-        reportCbor,
-        signature,
-        "GCREATOR",
-        1000,
-        2000
-      )
+      client.verifyAnalyticsAttestation("default", reportCbor, signature, "GCREATOR", 1000, 2000)
     ).toBe(XDR);
     expect(mockCall).toHaveBeenCalledWith(
       "verify_analytics_attestation",
@@ -216,6 +225,19 @@ describe("LinkoraClient write methods", () => {
       addr("GCREATOR"),
       val(1000),
       val(2000)
+    );
+  });
+
+  it("rejects malformed addresses before building tx", () => {
+    expect(() => client.createPost("not-an-address", "hello")).toThrow(InvalidInputError);
+    expect(() => client.follow("not-an-address", "GVALID")).toThrow(InvalidInputError);
+    expect(() => client.tip("GVALID", 3, "not-an-address", 100)).toThrow(InvalidInputError);
+  });
+
+  it("rejects empty content and unsupported governance parameters", () => {
+    expect(() => client.createPost("GVALID", "")).toThrow(InvalidInputError);
+    expect(() => client.govPropose("GVALID", "Unsupported" as never, 1, null)).toThrow(
+      InvalidInputError
     );
   });
 });

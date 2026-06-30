@@ -1,5 +1,15 @@
 import { Pool } from "pg";
-import { Database, Profile, Follow, Post, Like, Tip, Pool as PoolModel } from "./db";
+import {
+  Database,
+  Profile,
+  Follow,
+  Post,
+  Like,
+  Tip,
+  Pool as PoolModel,
+  GovernanceProposal,
+  GovernanceVote,
+} from "./db";
 
 export class PostgresDatabase implements Database {
   private pool: Pool;
@@ -172,6 +182,7 @@ export class PostgresDatabase implements Database {
       SELECT
         id,
         author,
+        content,
         deleted_at IS NOT NULL AS deleted,
         tip_total,
         like_count,
@@ -189,6 +200,7 @@ export class PostgresDatabase implements Database {
     return {
       id: BigInt(row.id),
       author: row.author,
+      content: row.content,
       deleted: row.deleted,
       tip_total: BigInt(row.tip_total),
       like_count: BigInt(row.like_count),
@@ -219,6 +231,7 @@ export class PostgresDatabase implements Database {
       SELECT
         id,
         author,
+        content,
         deleted_at IS NOT NULL AS deleted,
         tip_total,
         like_count,
@@ -235,6 +248,7 @@ export class PostgresDatabase implements Database {
     const posts: Post[] = res.rows.map((row) => ({
       id: BigInt(row.id),
       author: row.author,
+      content: row.content,
       deleted: row.deleted,
       tip_total: BigInt(row.tip_total),
       like_count: BigInt(row.like_count),
@@ -243,6 +257,165 @@ export class PostgresDatabase implements Database {
     }));
 
     return { posts, total };
+  }
+
+  async searchPosts(filters: {
+    q: string;
+    limit: number;
+    offset: number;
+  }): Promise<{ posts: Post[]; total: number }> {
+    const { q, limit, offset } = filters;
+
+    const sanitised = q
+      .trim()
+      .replace(/[^\w\s]/gu, " ")
+      .trim();
+
+    if (!sanitised) {
+      return { posts: [], total: 0 };
+    }
+
+    const tsQuery = sanitised
+      .split(/\s+/)
+      .filter(Boolean)
+      .map((t) => `${t}:*`)
+      .join(" & ");
+
+    const totalRes = await this.pool.query(
+      `
+      SELECT COUNT(*)::int AS total
+      FROM posts
+      WHERE deleted_at IS NULL
+        AND content_tsv @@ to_tsquery('english', $1)
+      `,
+      [tsQuery]
+    );
+    const total = totalRes.rows[0]?.total ?? 0;
+
+    const res = await this.pool.query(
+      `
+      SELECT
+        id,
+        author,
+        content,
+        deleted_at IS NOT NULL AS deleted,
+        tip_total,
+        like_count,
+        extract(epoch from created_at)::bigint AS created_ledger,
+        CASE WHEN deleted_at IS NULL THEN NULL ELSE extract(epoch from deleted_at)::bigint END AS deleted_ledger,
+        ts_rank(content_tsv, to_tsquery('english', $1)) AS rank
+      FROM posts
+      WHERE deleted_at IS NULL
+        AND content_tsv @@ to_tsquery('english', $1)
+      ORDER BY rank DESC, created_at DESC
+      OFFSET $2 LIMIT $3
+      `,
+      [tsQuery, offset, limit]
+    );
+
+    const posts: Post[] = res.rows.map((row) => ({
+      id: BigInt(row.id),
+      author: row.author,
+      content: row.content,
+      deleted: row.deleted,
+      tip_total: BigInt(row.tip_total),
+      like_count: BigInt(row.like_count),
+      created_ledger: Number(row.created_ledger),
+      deleted_ledger: row.deleted_ledger === null ? null : Number(row.deleted_ledger),
+    }));
+
+    return { posts, total };
+  }
+
+  async listPostsCursor(filters: {
+    author?: string;
+    limit: number;
+    cursor?: number;
+  }): Promise<{ posts: Post[]; total: number; hasMore: boolean }> {
+    const { author, limit, cursor } = filters;
+
+    const totalRes = await this.pool.query(
+      `
+      SELECT COUNT(*)::int AS total
+      FROM posts
+      WHERE ($1::text IS NULL OR author = $1)
+      `,
+      [author ?? null]
+    );
+    const total = totalRes.rows[0]?.total ?? 0;
+
+    if (cursor !== undefined) {
+      const res = await this.pool.query(
+        `
+        SELECT
+          id,
+          author,
+          content,
+          deleted_at IS NOT NULL AS deleted,
+          tip_total,
+          like_count,
+          extract(epoch from created_at)::bigint AS created_ledger,
+          CASE WHEN deleted_at IS NULL THEN NULL ELSE extract(epoch from deleted_at)::bigint END AS deleted_ledger
+        FROM posts
+        WHERE ($1::text IS NULL OR author = $1)
+          AND created_at < to_timestamp($2)
+        ORDER BY created_at DESC
+        LIMIT $3
+        `,
+        [author ?? null, cursor, limit + 1]
+      );
+
+      const hasMore = res.rows.length > limit;
+      const rows = hasMore ? res.rows.slice(0, limit) : res.rows;
+
+      const posts: Post[] = rows.map((row) => ({
+        id: BigInt(row.id),
+        author: row.author,
+        content: row.content,
+        deleted: row.deleted,
+        tip_total: BigInt(row.tip_total),
+        like_count: BigInt(row.like_count),
+        created_ledger: Number(row.created_ledger),
+        deleted_ledger: row.deleted_ledger === null ? null : Number(row.deleted_ledger),
+      }));
+
+      return { posts, total, hasMore };
+    }
+
+    const res = await this.pool.query(
+      `
+      SELECT
+        id,
+        author,
+        content,
+        deleted_at IS NOT NULL AS deleted,
+        tip_total,
+        like_count,
+        extract(epoch from created_at)::bigint AS created_ledger,
+        CASE WHEN deleted_at IS NULL THEN NULL ELSE extract(epoch from deleted_at)::bigint END AS deleted_ledger
+      FROM posts
+      WHERE ($1::text IS NULL OR author = $1)
+      ORDER BY created_at DESC
+      LIMIT $2
+      `,
+      [author ?? null, limit + 1]
+    );
+
+    const hasMore = res.rows.length > limit;
+    const rows = hasMore ? res.rows.slice(0, limit) : res.rows;
+
+    const posts: Post[] = rows.map((row) => ({
+      id: BigInt(row.id),
+      author: row.author,
+      content: row.content,
+      deleted: row.deleted,
+      tip_total: BigInt(row.tip_total),
+      like_count: BigInt(row.like_count),
+      created_ledger: Number(row.created_ledger),
+      deleted_ledger: row.deleted_ledger === null ? null : Number(row.deleted_ledger),
+    }));
+
+    return { posts, total, hasMore };
   }
 
   // ───────────────────────────────── Likes ────────────────────────────────────
@@ -393,5 +566,270 @@ export class PostgresDatabase implements Database {
       `,
       [admin, ledger, pool_id]
     );
+  }
+
+  // ────────────────────────────── Governance ──────────────────────────────────
+
+  async upsertGovernanceProposal(
+    proposal: Omit<GovernanceProposal, "votes_for" | "votes_against">
+  ): Promise<void> {
+    await this.pool.query(
+      `
+      INSERT INTO governance_proposals (proposal_id, proposer, parameter, new_value, status, created_ledger, updated_ledger)
+      VALUES ($1, $2, $3, $4, $5, $6, $7)
+      ON CONFLICT (proposal_id) DO UPDATE SET
+        proposer = EXCLUDED.proposer,
+        parameter = EXCLUDED.parameter,
+        new_value = EXCLUDED.new_value,
+        status = EXCLUDED.status,
+        updated_ledger = EXCLUDED.updated_ledger
+      `,
+      [
+        proposal.proposal_id.toString(),
+        proposal.proposer,
+        proposal.parameter,
+        proposal.new_value.toString(),
+        proposal.status,
+        proposal.created_ledger,
+        proposal.updated_ledger,
+      ]
+    );
+  }
+
+  // ───────────────────────────────── Reports ───────────────────────────────────
+
+  async insertReport(report: import("./db").Report): Promise<void> {
+    await this.pool.query(
+      `
+      INSERT INTO reports (post_id, reporter_address, reason, status)
+      VALUES ($1, $2, $3, $4)
+      ON CONFLICT (post_id, reporter_address) WHERE status = 'pending' DO NOTHING
+      `,
+      [
+        report.post_id.toString(),
+        report.reporter_address,
+        report.reason,
+        report.status || "pending",
+      ]
+    );
+  }
+
+  async updateGovernanceProposalStatus(
+    proposal_id: bigint,
+    status: string,
+    ledger: number
+  ): Promise<void> {
+    await this.pool.query(
+      `
+      UPDATE governance_proposals
+      SET status = $1, updated_ledger = $2
+      WHERE proposal_id = $3
+      `,
+      [status, ledger, proposal_id.toString()]
+    );
+  }
+
+  async insertGovernanceVote(vote: GovernanceVote): Promise<boolean> {
+    const res = await this.pool.query(
+      `
+      INSERT INTO governance_votes (proposal_id, voter, support, ledger)
+      VALUES ($1, $2, $3, $4)
+      ON CONFLICT (proposal_id, voter) DO NOTHING
+      RETURNING proposal_id
+      `,
+      [vote.proposal_id.toString(), vote.voter, vote.support, vote.ledger]
+    );
+
+    const inserted = (res.rowCount ?? 0) > 0;
+    if (inserted) {
+      if (vote.support) {
+        await this.pool.query(
+          `
+          UPDATE governance_proposals
+          SET votes_for = votes_for + 1, updated_ledger = $1
+          WHERE proposal_id = $2
+          `,
+          [vote.ledger, vote.proposal_id.toString()]
+        );
+      } else {
+        await this.pool.query(
+          `
+          UPDATE governance_proposals
+          SET votes_against = votes_against + 1, updated_ledger = $1
+          WHERE proposal_id = $2
+          `,
+          [vote.ledger, vote.proposal_id.toString()]
+        );
+      }
+    }
+    return inserted;
+  }
+
+  async listGovernanceProposals(filters: {
+    limit: number;
+    offset: number;
+  }): Promise<{ proposals: GovernanceProposal[]; total: number }> {
+    const { limit, offset } = filters;
+    const totalRes = await this.pool.query(
+      `SELECT COUNT(*)::int AS total FROM governance_proposals`
+    );
+    const total = totalRes.rows[0]?.total ?? 0;
+
+    const res = await this.pool.query(
+      `
+      SELECT proposal_id, proposer, parameter, new_value, votes_for, votes_against, status, created_ledger, updated_ledger
+      FROM governance_proposals
+      ORDER BY proposal_id DESC
+      OFFSET $1 LIMIT $2
+      `,
+      [offset, limit]
+    );
+
+    const proposals: GovernanceProposal[] = res.rows.map((row) => ({
+      proposal_id: BigInt(row.proposal_id),
+      proposer: row.proposer,
+      parameter: row.parameter,
+      new_value: BigInt(row.new_value),
+      votes_for: BigInt(row.votes_for),
+      votes_against: BigInt(row.votes_against),
+      status: row.status,
+      created_ledger: row.created_ledger,
+      updated_ledger: row.updated_ledger,
+    }));
+
+    return { proposals, total };
+  }
+
+  async updateReportStatus(
+    post_id: bigint,
+    reporter_address: string,
+    status: "dismissed" | "action_taken",
+    moderator_address?: string,
+    moderator_notes?: string
+  ): Promise<void> {
+    const query = `
+      UPDATE reports
+      SET status = $1,
+          moderator_address = $2,
+          moderator_notes = $3
+      WHERE post_id = $4 AND reporter_address = $5 AND status = 'pending'
+    `;
+
+    await this.pool.query(query, [
+      status,
+      moderator_address || null,
+      moderator_notes || null,
+      post_id.toString(),
+      reporter_address,
+    ]);
+  }
+
+  async getPostReports(post_id: bigint): Promise<import("./db").Report[]> {
+    const res = await this.pool.query(
+      `
+      SELECT
+        id,
+        post_id,
+        reporter_address,
+        reason,
+        status,
+        moderator_address,
+        moderator_notes,
+        created_at,
+        updated_at
+      FROM reports
+      WHERE post_id = $1
+      ORDER BY created_at DESC
+      `,
+      [post_id.toString()]
+    );
+
+    return res.rows.map((row) => ({
+      id: row.id,
+      post_id: BigInt(row.post_id),
+      reporter_address: row.reporter_address,
+      reason: row.reason,
+      status: row.status,
+      moderator_address: row.moderator_address,
+      moderator_notes: row.moderator_notes,
+      created_at: row.created_at,
+      updated_at: row.updated_at,
+    }));
+  }
+
+  // ───────────────────────────────── Blocks ───────────────────────────────────
+
+  async insertBlock(block: { blocker: string; blocked: string }): Promise<void> {
+    await this.pool.query(
+      `
+      INSERT INTO blocks (blocker, blocked)
+      VALUES ($1, $2)
+      ON CONFLICT (blocker, blocked) DO NOTHING
+      `,
+      [block.blocker, block.blocked]
+    );
+  }
+
+  async deleteBlock(blocker: string, blocked: string): Promise<void> {
+    await this.pool.query(
+      `
+      DELETE FROM blocks
+      WHERE blocker = $1 AND blocked = $2
+      `,
+      [blocker, blocked]
+    );
+  }
+
+  async getBlockedUsers(
+    address: string,
+    limit: number,
+    offset: number
+  ): Promise<{ blocked: string[]; total: number }> {
+    const totalRes = await this.pool.query(
+      `SELECT COUNT(*)::int AS total FROM blocks WHERE blocker = $1`,
+      [address]
+    );
+    const total = totalRes.rows[0]?.total ?? 0;
+
+    const res = await this.pool.query(
+      `
+      SELECT blocked
+      FROM blocks
+      WHERE blocker = $1
+      ORDER BY blocked ASC
+      OFFSET $2 LIMIT $3
+      `,
+      [address, offset, limit]
+    );
+
+    return { blocked: res.rows.map((r) => r.blocked as string), total };
+  }
+
+  // ───────────────────────────────── DM Keys ──────────────────────────────────
+
+  async upsertDmKey(dmKey: { address: string; x25519_pubkey: string }): Promise<void> {
+    await this.pool.query(
+      `
+      INSERT INTO dm_keys (address, x25519_pubkey, updated_at)
+      VALUES ($1, $2, NOW())
+      ON CONFLICT (address)
+      DO UPDATE SET
+        x25519_pubkey = EXCLUDED.x25519_pubkey,
+        updated_at = EXCLUDED.updated_at
+      `,
+      [dmKey.address, dmKey.x25519_pubkey]
+    );
+  }
+
+  async getDmKey(address: string): Promise<string | null> {
+    const res = await this.pool.query(
+      `
+      SELECT x25519_pubkey
+      FROM dm_keys
+      WHERE address = $1
+      `,
+      [address]
+    );
+    return res.rows[0]?.x25519_pubkey ?? null;
   }
 }

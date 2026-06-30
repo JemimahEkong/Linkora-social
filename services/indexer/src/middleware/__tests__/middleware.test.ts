@@ -134,7 +134,7 @@ describe("RateLimiter (sliding window unit)", () => {
 
 // ── HTTP-level Rate Limit Tests ───────────────────────────────────────────────
 
-describe("rateLimitRead middleware (60 req/min per IP)", () => {
+describe("rateLimitRead middleware (100 req/min per IP)", () => {
   let app: express.Express;
 
   beforeEach(() => {
@@ -147,11 +147,11 @@ describe("rateLimitRead middleware (60 req/min per IP)", () => {
     });
   });
 
-  it("allows the first 60 requests and returns 429 on the 61st", async () => {
+  it("allows the first 100 requests and returns 429 on the 101st", async () => {
     const ip = "10.0.0.1";
     const headers = { "x-forwarded-for": ip };
 
-    for (let i = 0; i < 60; i++) {
+    for (let i = 0; i < 100; i++) {
       const res = await request(app).get("/test").set(headers);
       expect(res.status).toBe(200);
     }
@@ -162,24 +162,24 @@ describe("rateLimitRead middleware (60 req/min per IP)", () => {
     expect(res.body.code).toBe("RATE_LIMIT_EXCEEDED");
   }, 30_000);
 
-  it("burst of 70 requests: exactly 60 allowed and 10 rate-limited", async () => {
+  it("burst of 110 requests: exactly 100 allowed and 10 rate-limited", async () => {
     const ip = "10.0.0.2";
     const headers = { "x-forwarded-for": ip };
     const statuses: number[] = [];
 
-    for (let i = 0; i < 70; i++) {
+    for (let i = 0; i < 110; i++) {
       const res = await request(app).get("/test").set(headers);
       statuses.push(res.status);
     }
 
     const allowed = statuses.filter((s) => s === 200).length;
     const limited = statuses.filter((s) => s === 429).length;
-    expect(allowed).toBe(60);
+    expect(allowed).toBe(100);
     expect(limited).toBe(10);
   }, 30_000);
 
   it("different IPs have independent counters", async () => {
-    for (let i = 0; i < 60; i++) {
+    for (let i = 0; i < 100; i++) {
       await request(app).get("/test").set({ "x-forwarded-for": "10.1.0.1" });
     }
     expect((await request(app).get("/test").set({ "x-forwarded-for": "10.1.0.1" })).status).toBe(
@@ -192,7 +192,7 @@ describe("rateLimitRead middleware (60 req/min per IP)", () => {
 
   it("includes Retry-After header with a value in [1, 60] seconds", async () => {
     const headers = { "x-forwarded-for": "10.0.0.3" };
-    for (let i = 0; i < 60; i++) await request(app).get("/test").set(headers);
+    for (let i = 0; i < 100; i++) await request(app).get("/test").set(headers);
 
     const res = await request(app).get("/test").set(headers);
     expect(res.status).toBe(429);

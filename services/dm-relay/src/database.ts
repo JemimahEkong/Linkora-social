@@ -32,6 +32,10 @@ class Database {
     console.log('Database initialized successfully');
   }
 
+  async ping(): Promise<void> {
+    await this.pool.query('SELECT 1');
+  }
+
   private async createTables(): Promise<void> {
     const createMessagesTable = `
       CREATE TABLE IF NOT EXISTS dm_messages (
@@ -104,6 +108,32 @@ class Database {
     `;
     
     const values: (string | number)[] = [conversationId];
+
+    if (beforeCreatedAt) {
+      query += ' AND created_at < $2';
+      values.push(beforeCreatedAt);
+    }
+
+    query += ' ORDER BY created_at DESC LIMIT $' + (values.length + 1);
+    values.push(limit);
+
+    const result = await this.pool.query(query, values);
+    return result.rows;
+  }
+
+  async getMessagesByRecipient(
+    recipient: string,
+    limit: number = 50,
+    beforeCreatedAt?: Date
+  ): Promise<DbMessage[]> {
+    let query = `
+      SELECT id, conversation_id, sender, recipient, ciphertext_b64,
+             message_index, timestamp, created_at
+      FROM dm_messages
+      WHERE recipient = $1
+    `;
+
+    const values: (string | number | Date)[] = [recipient];
 
     if (beforeCreatedAt) {
       query += ' AND created_at < $2';

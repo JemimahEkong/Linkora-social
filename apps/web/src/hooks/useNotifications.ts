@@ -1,23 +1,18 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import {
-  LinkoraEventSubscriber,
-  LocalStorageCursorStore,
-  FollowEvent,
-  LikeEvent,
-  TipEvent,
-} from "linkora-sdk";
 import { useWalletContext } from "@/components/WalletProvider";
 import { useNotificationsContext } from "@/contexts/NotificationsContext";
 
-export type NotificationType = "follow" | "like" | "tip";
+export type NotificationType = "follow" | "like" | "tip" | "governance";
 
 export interface Notification {
   id: string;
   type: NotificationType;
   actor: string;
   postId?: number;
+  proposalId?: number;
+  parameter?: string;
   amountXlm?: string;
   excerpt?: string;
   timestamp: string;
@@ -27,9 +22,8 @@ export interface Notification {
 const LS_NOTIFICATIONS_KEY = "linkora:notifications:items";
 const PAGE_SIZE = 10;
 const EXCERPT_LEN = 60;
-const RPC_URL = process.env.NEXT_PUBLIC_SOROBAN_RPC_URL ?? "https://soroban-testnet.stellar.org";
-const CONTRACT_ID = process.env.NEXT_PUBLIC_CONTRACT_ID ?? "";
 const INDEXER_URL = process.env.NEXT_PUBLIC_INDEXER_URL ?? "http://localhost:3001";
+const INDEXER_WS_URL = INDEXER_URL.replace(/^http/, "ws") + "/ws";
 
 function loadStored(address: string): Notification[] {
   try {
@@ -45,7 +39,7 @@ function persist(address: string, items: Notification[]): void {
   localStorage.setItem(`${LS_NOTIFICATIONS_KEY}:${address}`, JSON.stringify(items));
 }
 
-function stroopsToXlm(amount: bigint): string {
+function stroopsToXlm(amount: bigint | string | number): string {
   return (Number(amount) / 1e7).toFixed(2);
 }
 
@@ -67,7 +61,6 @@ export function useNotifications() {
   const { incrementUnread, resetUnread } = useNotificationsContext();
   const [notifications, setNotifications] = useState<Notification[]>([]);
   const [page, setPage] = useState(1);
-  const subscriberRef = useRef<LinkoraEventSubscriber | null>(null);
   const addressRef = useRef<string | null>(null);
 
   useEffect(() => {
@@ -96,64 +89,89 @@ export function useNotifications() {
   );
 
   useEffect(() => {
-    if (!address || !CONTRACT_ID) return;
+    if (!address) return;
 
-    const cursorStore = new LocalStorageCursorStore(`linkora:cursor:notifications:${address}`);
+    const ws = new WebSocket(INDEXER_WS_URL);
 
-    const subscriber = new LinkoraEventSubscriber({
-      rpcUrl: RPC_URL,
-      contractId: CONTRACT_ID,
-      cursorStore,
-      minPollIntervalMs: 5_000,
-      maxPollIntervalMs: 30_000,
-    });
+    ws.onopen = () => {
+      ws.send(
+        JSON.stringify({
+          action: "subscribe",
+          types: ["follow", "like", "tip", "gov_proposal_created", "gov_proposal_executed"],
+        })
+      );
+    };
 
-    subscriberRef.current = subscriber;
+    ws.onmessage = async (e) => {
+      try {
+        const { type, payload } = JSON.parse(e.data);
+        if (!payload || !payload.data) return;
 
-    const unsubscribe = subscriber.subscribe({
-      follow(event: FollowEvent) {
-        if (event.followee !== address) return;
-        addNotification({
-          id: event.meta.id ?? `follow-${event.follower}-${Date.now()}`,
-          type: "follow",
-          actor: event.follower,
-          timestamp: event.meta.ledgerClosedAt ?? new Date().toISOString(),
-          read: false,
-        });
-      },
-      async like(event: LikeEvent) {
-        const excerpt = await fetchPostExcerpt(event.post_id);
-        addNotification({
-          id: event.meta.id ?? `like-${event.user}-${event.post_id}-${Date.now()}`,
-          type: "like",
-          actor: event.user,
-          postId: event.post_id,
-          excerpt,
-          timestamp: event.meta.ledgerClosedAt ?? new Date().toISOString(),
-          read: false,
-        });
-      },
-      async tip(event: TipEvent) {
-        const excerpt = await fetchPostExcerpt(event.post_id);
-        addNotification({
-          id: event.meta.id ?? `tip-${event.tipper}-${event.post_id}-${Date.now()}`,
-          type: "tip",
-          actor: event.tipper,
-          postId: event.post_id,
-          amountXlm: stroopsToXlm(event.amount),
-          excerpt,
-          timestamp: event.meta.ledgerClosedAt ?? new Date().toISOString(),
-          read: false,
-        });
-      },
-    });
+        const data = payload.data;
+        const timestamp = data.ledgerClosedAt ?? new Date().toISOString();
+        const eventId = data.pagingToken ?? `${type}-${Date.now()}`;
 
-    subscriber.start();
+        if (type === "follow" && data.followee === address) {
+          addNotification({
+            id: eventId,
+            type: "follow",
+            actor: data.follower,
+            timestamp,
+            read: false,
+          });
+        } else if (type === "like" && data.user !== address) {
+          const excerpt = await fetchPostExcerpt(data.post_id);
+          addNotification({
+            id: eventId,
+            type: "like",
+            actor: data.user,
+            postId: data.post_id,
+            excerpt,
+            timestamp,
+            read: false,
+          });
+        } else if (type === "tip" && data.tipper !== address) {
+          const excerpt = await fetchPostExcerpt(data.post_id);
+          addNotification({
+            id: eventId,
+            type: "tip",
+            actor: data.tipper,
+            postId: data.post_id,
+            amountXlm: stroopsToXlm(data.amount),
+            excerpt,
+            timestamp,
+            read: false,
+          });
+        } else if (type === "gov_proposal_created") {
+          addNotification({
+            id: eventId,
+            type: "governance",
+            actor: data.proposer ?? "System",
+            proposalId: data.proposal_id,
+            parameter: data.parameter,
+            excerpt: "A new governance proposal was created",
+            timestamp,
+            read: false,
+          });
+        } else if (type === "gov_proposal_executed") {
+          addNotification({
+            id: eventId,
+            type: "governance",
+            actor: "System",
+            proposalId: data.proposal_id,
+            parameter: data.parameter,
+            excerpt: "A governance proposal was executed",
+            timestamp,
+            read: false,
+          });
+        }
+      } catch (err) {
+        console.error("Failed to process websocket message", err);
+      }
+    };
 
     return () => {
-      unsubscribe();
-      subscriber.stop();
-      subscriberRef.current = null;
+      ws.close();
     };
   }, [address, addNotification]);
 

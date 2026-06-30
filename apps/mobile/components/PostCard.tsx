@@ -1,4 +1,5 @@
 import React, { useMemo } from "react";
+import * as Haptics from "expo-haptics";
 import {
   GestureResponderEvent,
   Pressable,
@@ -24,6 +25,7 @@ export interface Post {
   timestamp: number;
   like_count: number;
   has_liked?: boolean;
+  sync_status?: "synced" | "pending" | "failed";
 }
 
 interface FeedPostCardProps {
@@ -95,7 +97,14 @@ export function PostCard(props: PostCardProps) {
   }
 
   const handleLikePress = (event: GestureResponderEvent) => {
-    event.stopPropagation();
+    // Stop propagation so a like tap doesn't also fire the parent card's
+    // onPress (which navigates to the post detail). Guarded because some
+    // react-native testing-library versions pass `undefined` here for
+    // Pressable targets, and we still want haptic + like() to fire.
+    if (event && typeof event.stopPropagation === "function") {
+      event.stopPropagation();
+    }
+    void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => undefined);
     void like();
   };
 
@@ -114,7 +123,11 @@ export function PostCard(props: PostCardProps) {
           <Text style={styles.username}>{post.username}</Text>
           <Text style={styles.address}>{shortAddress(post.author)}</Text>
         </View>
-        <Text style={styles.time}>{timeLabel ?? formatTimestamp(post.timestamp)}</Text>
+        <View style={styles.timeContainer}>
+          <Text style={styles.time}>{timeLabel ?? formatTimestamp(post.timestamp)}</Text>
+          {post.sync_status === "pending" && <Text style={styles.pendingBadge}>⏳ Syncing</Text>}
+          {post.sync_status === "failed" && <Text style={styles.failedBadge}>⚠️ Failed</Text>}
+        </View>
       </View>
 
       <Text style={styles.content}>{post.content}</Text>
@@ -122,7 +135,11 @@ export function PostCard(props: PostCardProps) {
       <View style={styles.footer}>
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel={liked ? "Post already liked" : "Like post"}
+          accessibilityLabel={
+            liked
+              ? `Post already liked, ${likeCount} ${likeCount === 1 ? "like" : "likes"}`
+              : `Like post, currently ${likeCount} ${likeCount === 1 ? "like" : "likes"}`
+          }
           accessibilityState={{ disabled: liked || pending, selected: liked }}
           disabled={liked || pending}
           onPress={handleLikePress}
@@ -132,11 +149,24 @@ export function PostCard(props: PostCardProps) {
             pressed && !liked && !pending && styles.likeButtonPressed,
           ]}
         >
-          <Text style={[styles.stat, liked && styles.statLiked]}>
-            {liked ? "Liked" : "Like"} {likeCount}
-          </Text>
+          <View style={styles.likeInner}>
+            <Text style={[styles.likeIcon, liked && styles.likeIconLiked]}>
+              {liked ? "♥" : "♡"}
+            </Text>
+            <View
+              style={[styles.likeBadge, liked && styles.likeBadgeLiked]}
+              testID="like-count-badge"
+            >
+              <Text
+                style={[styles.likeBadgeText, liked && styles.likeBadgeTextLiked]}
+                testID="like-count-text"
+              >
+                {likeCount}
+              </Text>
+            </View>
+          </View>
         </Pressable>
-        <Text style={styles.stat}>Tips {post.tip_total}</Text>
+        <Text style={styles.stat}>💰 {post.tip_total.toFixed(2)}</Text>
       </View>
     </TouchableOpacity>
   );
@@ -192,6 +222,20 @@ function createStyles(theme: ReturnType<typeof useTheme>["theme"]) {
       color: theme.colors.text.secondary,
       fontSize: 11,
     },
+    timeContainer: {
+      alignItems: "flex-end",
+    },
+    pendingBadge: {
+      fontSize: 9,
+      color: theme.colors.text.secondary,
+      marginTop: 2,
+    },
+    failedBadge: {
+      fontSize: 9,
+      color: theme.colors.semantic?.error ?? "#EF4444",
+      fontWeight: "700",
+      marginTop: 2,
+    },
     content: {
       color: theme.colors.text.primary,
       fontSize: 14,
@@ -218,6 +262,39 @@ function createStyles(theme: ReturnType<typeof useTheme>["theme"]) {
     },
     likeButtonPressed: {
       opacity: 0.82,
+    },
+    likeInner: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 6,
+    },
+    likeIcon: {
+      fontSize: 16,
+      color: theme.colors.text.secondary,
+      lineHeight: 18,
+    },
+    likeIconLiked: {
+      color: theme.colors.brand.primary,
+    },
+    likeBadge: {
+      minWidth: 22,
+      paddingHorizontal: 7,
+      paddingVertical: 2,
+      borderRadius: 999,
+      backgroundColor: theme.colors.surface.surface2,
+      alignItems: "center",
+      justifyContent: "center",
+    },
+    likeBadgeLiked: {
+      backgroundColor: theme.colors.brand.primaryLight,
+    },
+    likeBadgeText: {
+      color: theme.colors.text.secondary,
+      fontSize: 11,
+      fontWeight: "700",
+    },
+    likeBadgeTextLiked: {
+      color: theme.colors.brand.primary,
     },
     stat: {
       color: theme.colors.text.secondary,

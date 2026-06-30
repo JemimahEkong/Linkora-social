@@ -5,14 +5,16 @@
  * are end-to-end encrypted using X25519 + ChaCha20-Poly1305.
  */
 
+import http from 'http';
 import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
 import dotenv from 'dotenv';
+import { WebSocketServer, WebSocket } from 'ws';
 import { Database } from './database';
 import { AuthService } from './auth';
 import { CleanupService } from './cleanup';
-import { createRouter } from './routes';
+import { createRouter, registerWsClient } from './routes';
 import {
   requestIdMiddleware,
   requestLoggerMiddleware,
@@ -20,9 +22,15 @@ import {
   notFoundHandler,
   validateContentType,
 } from './middleware';
+import { messageAuthMiddleware } from './middleware/auth';
+import { rateLimitMiddleware } from './middleware/rateLimit';
 
 // Load environment variables
 dotenv.config();
+
+const SERVICE_VERSION = process.env.npm_package_version ?? '0.1.0';
+const COMMIT_SHA = process.env.COMMIT_SHA ?? 'unknown';
+const startTime = Date.now();
 
 // Configuration
 const config = {
@@ -54,13 +62,8 @@ async function createApp() {
   // Body parsing
   app.use(express.json({ limit: '1mb' })); // Limit request size
 
-  // Custom middleware
-  app.use(requestIdMiddleware);
-  app.use(requestLoggerMiddleware);
-  app.use(validateContentType);
-
   // Initialize database
-  console.log('Connecting to database...');
+  logger.info({ service: 'dm-relay' }, 'Connecting to database...');
   const database = new Database(config.databaseUrl);
   await database.init();
 
@@ -71,62 +74,102 @@ async function createApp() {
   const cleanupService = new CleanupService(database, config.messageTtlDays);
   cleanupService.start();
 
+  // Custom middleware
+  app.use(requestIdMiddleware);
+  app.use(requestLoggerMiddleware);
+  app.use(validateContentType);
+
+  // Rate limiting
+  app.use('/api', rateLimitMiddleware);
+  const messageAuth = messageAuthMiddleware(authService);
+  app.use('/api/messages', messageAuth);
+
   // API routes
   app.use('/api', createRouter(database, authService));
 
-  // Health check at root
-  app.get('/', (req, res) => {
-    res.json({
-      service: 'linkora-dm-relay',
-      version: '0.1.0',
-      status: 'running',
-      timestamp: new Date().toISOString(),
+  // ── Health endpoints ───────────────────────────────────────────────────────
+
+  app.get('/health', async (_req, res) => {
+    const uptime = Math.floor((Date.now() - startTime) / 1000);
+    let dbStatus = 'disconnected';
+    try { await database.ping(); dbStatus = 'connected'; } catch { /* */ }
+    const ok = dbStatus === 'connected';
+    res.status(ok ? 200 : 503).json({
+      status: ok ? 'ok' : 'degraded',
+      uptime,
+      version: SERVICE_VERSION,
+      commit: COMMIT_SHA,
+      db: dbStatus,
     });
+  });
+
+  app.get('/health/ready', async (_req, res) => {
+    try {
+      await database.ping();
+      res.json({ status: 'ready' });
+    } catch {
+      res.status(503).json({ status: 'not ready', reason: 'db unavailable' });
+    }
+  });
+
+  app.get('/health/live', (_req, res) => {
+    res.json({ status: 'live' });
+  });
+
+  // Root info
+  app.get('/', (_req, res) => {
+    res.json({ service: 'linkora-dm-relay', version: SERVICE_VERSION, status: 'running' });
   });
 
   // Error handling
   app.use(notFoundHandler);
   app.use(errorHandler);
 
+  // WebSocket server for real-time push to online recipients
+  // Clients connect with ?address=<STELLAR_ADDRESS> to receive their messages.
+  const httpServer = http.createServer(app);
+  const wss = new WebSocketServer({ server: httpServer, path: '/ws' });
+
+  wss.on('connection', (ws: WebSocket, req) => {
+    const url = new URL(req.url ?? '/', `http://localhost`);
+    const address = url.searchParams.get('address') ?? '';
+    if (address) {
+      registerWsClient(address, ws);
+      logger.info({ address }, 'WebSocket client connected');
+    } else {
+      ws.close(1008, 'Missing address query param');
+    }
+  });
+
   // Graceful shutdown
   const gracefulShutdown = async (signal: string) => {
-    console.log(`\nReceived ${signal}. Starting graceful shutdown...`);
-    
+    logger.info({ signal }, 'Starting graceful shutdown...');
+
+    wss.close();
     cleanupService.stop();
     await database.close();
-    
-    console.log('Graceful shutdown completed.');
+
+    logger.info('Graceful shutdown completed');
     process.exit(0);
   };
 
   process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
   process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
-  return { app, database, cleanupService };
+  return { app: httpServer, database, cleanupService };
 }
 
 async function startServer() {
   try {
-    const { app } = await createApp();
+    const { app: httpServer } = await createApp();
 
-    const server = app.listen(config.port, () => {
-      console.log(`
-╭─────────────────────────────────────────────────╮
-│  🔐 Linkora DM Relay Service                    │
-│                                                 │
-│  Port:        ${config.port.toString().padEnd(30)} │
-│  Environment: ${config.nodeEnv.padEnd(30)} │
-│  TTL:         ${config.messageTtlDays} days${' '.repeat(24)} │
-│                                                 │
-│  📡 Server running and ready for encrypted     │
-│     message relay (transport-only mode)        │
-╰─────────────────────────────────────────────────╯
-      `);
+    const server = httpServer.listen(config.port, () => {
+      logger.info({ port: config.port, env: config.nodeEnv, ttlDays: config.messageTtlDays }, 'DM Relay service started');
     });
 
     return server;
   } catch (error) {
-    console.error('Failed to start server:', error);
+    logger.error({ err: error }, 'Failed to start server');
     process.exit(1);
   }
 }

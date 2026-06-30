@@ -4,16 +4,18 @@ import { Request, Response, NextFunction } from "express";
 
 // ── Logger setup ──────────────────────────────────────────────────────────────
 
+const isDev = process.env.NODE_ENV !== "production";
+
 const pinoLogger = pino({
   level: process.env.LOG_LEVEL || "info",
-  transport: {
-    target: "pino-pretty",
-    options: {
-      colorize: true,
-      ignore: "pid,hostname",
-      translateTime: "SYS:standard",
+  base: { service: "indexer" },
+  timestamp: pino.stdTimeFunctions.isoTime,
+  ...(isDev && {
+    transport: {
+      target: "pino-pretty",
+      options: { colorize: true, ignore: "pid,hostname", translateTime: "SYS:standard" },
     },
-  },
+  }),
 });
 
 export const logger = pinoLogger;
@@ -24,12 +26,16 @@ interface RequestContext {
   requestId: string;
   startTime: number;
   stellarAddress?: string;
+  userId?: string;
   ipAddress?: string;
 }
 
-declare module "express-serve-static-core" {
-  interface Request {
-    context?: RequestContext;
+declare global {
+  // eslint-disable-next-line @typescript-eslint/no-namespace
+  namespace Express {
+    interface Request {
+      context?: RequestContext;
+    }
   }
 }
 
@@ -78,46 +84,32 @@ export function requestLoggingMiddleware(req: Request, res: Response, next: Next
     ipAddress = forwarded.split(",")[0].trim();
   }
 
-  req.context = {
-    requestId,
-    startTime,
-    ipAddress,
-  };
+  req.context = { requestId, startTime, ipAddress };
 
-  // Log incoming request
-  logger.info(
-    {
-      requestId,
-      method: req.method,
-      path: req.path,
-      ipAddress,
-    },
-    "Incoming request"
-  );
+  logger.info({ requestId, method: req.method, path: req.path, ipAddress }, "Incoming request");
 
   // Capture the response end to log completion
   const originalSend = res.send;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   res.send = function (data: any) {
-    const durationMs = Date.now() - startTime;
+    const duration = Date.now() - startTime;
+    const userId = req.context?.stellarAddress ?? req.context?.userId;
     const logData = {
       requestId,
       method: req.method,
       path: req.path,
       statusCode: res.statusCode,
-      durationMs,
+      duration,
       ipAddress,
-      ...(req.context?.stellarAddress && { stellarAddress: req.context.stellarAddress }),
+      ...(userId && { userId }),
     };
 
-    // Log slow queries at warn level
-    if (durationMs > 500) {
-      logger.warn(logData, "Slow query");
+    if (duration > 500) {
+      logger.warn(logData, "Slow request");
     } else {
       logger.info(logData, "Request completed");
     }
 
-    // Track abuse attempts (429 responses)
     if (res.statusCode === 429) {
       recordAbuseAttempt(ipAddress);
     }
